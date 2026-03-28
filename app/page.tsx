@@ -52,6 +52,7 @@ interface StrategyStepContent {
 interface StrategyStep {
   img: string;
   contents: StrategyStepContent[];
+  text?: string;
 }
 
 interface Strategy {
