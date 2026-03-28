@@ -7,8 +7,7 @@ import { Session } from '@supabase/supabase-js';
 
 // Patch de compatibilité pour React 19 et React-Quill
 if (typeof window !== 'undefined') {
-  // @ts-expect-error - needed for some libs expecting global
-  window.global = window;
+  (window as any).global = window;
   
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
