@@ -95,7 +95,6 @@ export default function StratBook() {
   const [maps, setMaps] = useState<MapData[]>([])
   const [loading, setLoading] = useState(true)
   const [session, setSession] = useState<Session | null>(null)
-  const [userProfile, setUserProfile] = useState<{ role: 'Joueur' | 'Coach' | 'Admin' } | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
   const [isCoachOrAdmin, setIsCoachOrAdmin] = useState(false)
   // NAVIGATION COULISSANTE (LOCKED)
@@ -127,7 +126,6 @@ export default function StratBook() {
       setSession(session);
       if (session) fetchUserProfile(session.user.id);
       else {
-        setUserProfile(null);
         setIsAdmin(false);
         setIsCoachOrAdmin(false);
       }
@@ -142,18 +140,17 @@ export default function StratBook() {
   useEffect(() => { if (view === "admin") fetchAdminData() }, [view])
 
   async function fetchUserProfile(userId: string) {
-    const { data, error } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle()
-    if (error) console.error("Error fetching profile:", error)
+    const { data, error: fetchError } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle()
+    if (fetchError) console.error("Error fetching profile:", fetchError)
     
     if (data) {
-      setUserProfile(data)
       setIsAdmin(data.role === 'Admin')
       setIsCoachOrAdmin(data.role === 'Admin' || data.role === 'Coach')
     } else {
       // Si le profil n'existe pas encore (nouvel utilisateur), on le crée par défaut en 'Joueur'
-      const { data: newProfile } = await supabase.from('profiles').insert([{ id: userId, role: 'Joueur' }]).select().single()
+      const { data: newProfile, error: insertError } = await supabase.from('profiles').insert([{ id: userId, role: 'Joueur' }]).select().single()
+      if (insertError) console.error("Error inserting profile:", insertError)
       if (newProfile) {
-        setUserProfile(newProfile)
         setIsAdmin(false)
         setIsCoachOrAdmin(false)
       }
@@ -173,6 +170,17 @@ export default function StratBook() {
     const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', userId);
     if (!error) fetchAdminData();
     else alert("Erreur lors de la mise à jour du rôle");
+  }
+
+  async function handleSocialAuth(provider: 'discord' | 'google') {
+    setAuthError(null);
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider,
+      options: {
+        redirectTo: window.location.origin
+      }
+    });
+    if (error) setAuthError(error.message);
   }
 
   async function handleAuth(e: React.FormEvent) {
@@ -227,9 +235,9 @@ export default function StratBook() {
 
   const addStep = () => setNewStrat({ ...newStrat, steps: [...newStrat.steps, { img: "", contents: [{ id: Date.now().toString(), text: "" }] }] });
   
-  const updateStep = (index: number, field: "img", value: string) => {
+  const updateStep = (index: number, value: string) => {
     const updatedSteps = [...newStrat.steps];
-    updatedSteps[index][field] = value;
+    updatedSteps[index].img = value;
     setNewStrat({ ...newStrat, steps: updatedSteps });
   };
 
@@ -275,7 +283,7 @@ export default function StratBook() {
     const storagePath = `${mapName}/${sideName}/${tabName}/${fileName}`;
 
     // 2. Mettre à jour l'état pour afficher "CHARGEMENT" sur l'étape
-    updateStep(index, "img", "LOADING");
+    updateStep(index, "LOADING");
 
     // 3. Upload technique vers Supabase Storage
     const { error } = await supabase.storage
@@ -284,7 +292,7 @@ export default function StratBook() {
 
     if (error) {
       alert("Erreur lors de l'upload : " + error.message);
-      updateStep(index, "img", "");
+      updateStep(index, "");
       return;
     }
 
@@ -292,7 +300,7 @@ export default function StratBook() {
     const {
       data: { publicUrl },
     } = supabase.storage.from("map-strategies").getPublicUrl(storagePath);
-    updateStep(index, "img", publicUrl);
+    updateStep(index, publicUrl);
   };
 
   async function saveStrategy() {
@@ -354,8 +362,10 @@ export default function StratBook() {
       error = insertError;
     }
 
-    if (error) alert("Erreur : " + error.message);
-    else { setShowStratModal(false); setNewStrat({ title: "", general_notes: "", steps: [] }); fetchStrategies(); }
+    if (error) {
+      const e = error as any;
+      alert("Erreur : " + e.message);
+    } else { setShowStratModal(false); setNewStrat({ title: "", general_notes: "", steps: [] }); fetchStrategies(); }
   }
 
   async function deleteStrategy(id: number) {
@@ -370,16 +380,17 @@ export default function StratBook() {
   if (loading) return <div style={{background: "#0f1923", color: "white", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center"}}>CHARGEMENT DU SYSTÈME...</div>
 
   if (!session) {
+    const accentColor = authView === "login" ? "#ff4655" : "#00f2ff";
     return (
       <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", position: "relative", fontFamily: 'sans-serif' }}>
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
         
-        <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: "2px solid #ff4655", width: "400px", boxShadow: "0 0 50px rgba(255,70,85,0.2)" }}>
-          <h1 style={{ color: "#ff4655", textAlign: "center", margin: "0 0 30px 0", fontWeight: "900", letterSpacing: "3px" }}>SCORTECK STRATBOOK</h1>
+        <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: `2px solid ${accentColor}`, width: "400px", boxShadow: `0 0 50px ${accentColor}33`, transition: "all 0.3s ease" }}>
+          <h1 style={{ color: accentColor, textAlign: "center", margin: "0 0 30px 0", fontWeight: "900", letterSpacing: "3px" }}>SCORTECK STRATBOOK</h1>
           
           <div style={{ display: "flex", marginBottom: "30px", borderBottom: "1px solid #333" }}>
             <button onClick={() => { setAuthView("login"); setIsVerifyStep(false); setAuthError(null); }} style={{ flex: 1, background: "none", border: "none", color: authView === "login" ? "#ff4655" : "#666", padding: "10px", fontWeight: "bold", cursor: "pointer", borderBottom: authView === "login" ? "2px solid #ff4655" : "none" }}>LOGIN</button>
-            <button onClick={() => { setAuthView("signup"); setIsVerifyStep(false); setAuthError(null); }} style={{ flex: 1, background: "none", border: "none", color: authView === "signup" ? "#ff4655" : "#666", padding: "10px", fontWeight: "bold", cursor: "pointer", borderBottom: authView === "signup" ? "2px solid #ff4655" : "none" }}>SIGN UP</button>
+            <button onClick={() => { setAuthView("signup"); setIsVerifyStep(false); setAuthError(null); }} style={{ flex: 1, background: "none", border: "none", color: authView === "signup" ? "#00f2ff" : "#666", padding: "10px", fontWeight: "bold", cursor: "pointer", borderBottom: authView === "signup" ? "2px solid #00f2ff" : "none" }}>SIGN UP</button>
           </div>
 
           {isVerifyStep ? (
@@ -388,15 +399,15 @@ export default function StratBook() {
                 fontSize: "3rem", 
                 marginBottom: "20px", 
                 animation: "pulse 2s infinite", 
-                color: "#ff4655" 
+                color: "#00f2ff" 
               }}>📡</div>
               
-              <h2 style={{ color: "#ff4655", fontSize: "1.2rem", fontWeight: "900", letterSpacing: "2px", marginBottom: "15px" }}>VÉRIFICATION DU PROTOCOLE</h2>
+              <h2 style={{ color: "#00f2ff", fontSize: "1.2rem", fontWeight: "900", letterSpacing: "2px", marginBottom: "15px" }}>VÉRIFICATION DU PROTOCOLE</h2>
               
-              <div style={{ background: "rgba(255,255,255,0.05)", padding: "15px", borderRadius: "8px", border: "1px solid rgba(255,70,85,0.2)", marginBottom: "25px" }}>
+              <div style={{ background: "rgba(255,255,255,0.05)", padding: "15px", borderRadius: "8px", border: "1px solid rgba(0,242,255,0.2)", marginBottom: "25px" }}>
                 <p style={{ fontSize: "0.85rem", lineHeight: "1.6", color: "#ccc", margin: 0 }}>
                   Transmission cryptée envoyée à <br/>
-                  <span style={{ color: "#ff4655", fontWeight: "bold" }}>{authEmail}</span>. <br/><br/>
+                  <span style={{ color: "#00f2ff", fontWeight: "bold" }}>{authEmail}</span>. <br/><br/>
                   Merci de valider votre identité pour déverrouiller le Stratbook.
                 </p>
               </div>
@@ -409,14 +420,14 @@ export default function StratBook() {
                   left: "-100%", 
                   width: "100%", 
                   height: "100%", 
-                  background: "#ff4655", 
+                  background: "#00f2ff", 
                   animation: "scan 1.5s infinite linear" 
                 }} />
               </div>
 
               <button 
                 onClick={() => { setIsVerifyStep(false); setAuthView("login"); }}
-                style={{ background: "transparent", border: "1px solid #ff4655", color: "#ff4655", padding: "12px 25px", borderRadius: "4px", fontWeight: "900", cursor: "pointer", letterSpacing: "1px", width: "100%" }}
+                style={{ background: "transparent", border: "1px solid #00f2ff", color: "#00f2ff", padding: "12px 25px", borderRadius: "4px", fontWeight: "900", cursor: "pointer", letterSpacing: "1px", width: "100%" }}
               >
                 RETOUR AU LOGIN
               </button>
@@ -434,26 +445,49 @@ export default function StratBook() {
               `}</style>
             </div>
           ) : (
-            <form onSubmit={handleAuth} style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
-              <div>
-                <label style={{ fontSize: "0.7rem", color: "#ff4655", fontWeight: "900", display: "block", marginBottom: "8px" }}>EMAIL</label>
-                <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} style={{ width: "100%", background: "#1a2531", border: "1px solid #333", color: "white", padding: "12px", borderRadius: "4px" }} required />
-              </div>
-              <div>
-                <label style={{ fontSize: "0.7rem", color: "#ff4655", fontWeight: "900", display: "block", marginBottom: "8px" }}>PASSWORD</label>
-                <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} style={{ width: "100%", background: "#1a2531", border: "1px solid #333", color: "white", padding: "12px", borderRadius: "4px" }} required />
-              </div>
-              
-              {authError && (
-                <div style={{ color: "#ff4655", fontSize: "0.75rem", fontWeight: "bold", background: "rgba(255,70,85,0.1)", padding: "10px", borderRadius: "4px", border: "1px solid rgba(255,70,85,0.2)" }}>
-                  ⚠️ {authError}
+            <>
+              <form onSubmit={handleAuth} style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                <div>
+                  <label style={{ fontSize: "0.7rem", color: accentColor, fontWeight: "900", display: "block", marginBottom: "8px" }}>EMAIL</label>
+                  <input type="email" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} style={{ width: "100%", background: "#1a2531", border: "1px solid #333", color: "white", padding: "12px", borderRadius: "4px" }} required />
                 </div>
-              )}
+                <div>
+                  <label style={{ fontSize: "0.7rem", color: accentColor, fontWeight: "900", display: "block", marginBottom: "8px" }}>PASSWORD</label>
+                  <input type="password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} style={{ width: "100%", background: "#1a2531", border: "1px solid #333", color: "white", padding: "12px", borderRadius: "4px" }} required />
+                </div>
+                
+                {authError && (
+                  <div style={{ color: accentColor, fontSize: "0.75rem", fontWeight: "bold", background: `${accentColor}1a`, padding: "10px", borderRadius: "4px", border: `1px solid ${accentColor}33` }}>
+                    ⚠️ {authError}
+                  </div>
+                )}
 
-              <button type="submit" style={{ background: "#ff4655", color: "white", padding: "15px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer", marginTop: "10px", letterSpacing: "2px" }}>
-                {authView === "login" ? "ACCESS GRANTED" : "REQUEST ACCESS"}
-              </button>
-            </form>
+                <button type="submit" style={{ background: accentColor, color: authView === "login" ? "white" : "#0f1923", padding: "15px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer", marginTop: "10px", letterSpacing: "2px" }}>
+                  {authView === "login" ? "ACCESS GRANTED" : "REQUEST ACCESS"}
+                </button>
+              </form>
+
+              <div style={{ margin: "30px 0 20px 0", display: "flex", alignItems: "center", gap: "10px" }}>
+                <div style={{ flex: 1, height: "1px", background: "#333" }} />
+                <span style={{ color: "#666", fontSize: "0.7rem", fontWeight: "bold" }}>SOCIAL LOGIN</span>
+                <div style={{ flex: 1, height: "1px", background: "#333" }} />
+              </div>
+
+              <div style={{ display: "flex", gap: "15px" }}>
+                <button 
+                  onClick={() => handleSocialAuth('discord')}
+                  style={{ flex: 1, background: "#5865F2", color: "white", border: "none", padding: "12px", borderRadius: "4px", cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", justifyContent: "center", gap: "10px" }}
+                >
+                  DISCORD
+                </button>
+                <button 
+                  onClick={() => handleSocialAuth('google')}
+                  style={{ flex: 1, background: "white", color: "#0f1923", border: "none", padding: "12px", borderRadius: "4px", cursor: "pointer", fontWeight: "bold", display: "flex", alignItems: "center", justifyContent: "center", gap: "10px" }}
+                >
+                  GOOGLE
+                </button>
+              </div>
+            </>
           )}
         </div>
       </div>
