@@ -140,15 +140,24 @@ export default function StratBook() {
   useEffect(() => { if (view === "admin") fetchAdminData() }, [view])
 
   async function fetchUserProfile(userId: string) {
-    const { data, error: fetchError } = await supabase.from('profiles').select('role').eq('id', userId).maybeSingle()
-    if (fetchError) console.error("Error fetching profile:", fetchError)
+    console.log("Fetching profile for user ID:", userId);
+    const { data, error: fetchError } = await supabase.from('profiles').select('is_admin').eq('id', userId).maybeSingle()
+    
+    if (fetchError) {
+      console.error("Error fetching profile:", fetchError);
+      return;
+    }
+    
+    console.log("Profile data found in DB:", data);
     
     if (data) {
-      setIsAdmin(data.role === 'Admin')
-      setIsCoachOrAdmin(data.role === 'Admin' || data.role === 'Coach')
+      const isUserAdmin = data.is_admin === true;
+      console.log("User is Admin?", isUserAdmin);
+      setIsAdmin(isUserAdmin)
+      setIsCoachOrAdmin(isUserAdmin)
     } else {
-      // Si le profil n'existe pas encore (nouvel utilisateur), on le crée par défaut en 'Joueur'
-      const { data: newProfile, error: insertError } = await supabase.from('profiles').insert([{ id: userId, role: 'Joueur' }]).select().single()
+      console.log("No profile found, creating default Joueur profile...");
+      const { data: newProfile, error: insertError } = await supabase.from('profiles').insert([{ id: userId, is_admin: false }]).select().single()
       if (insertError) console.error("Error inserting profile:", insertError)
       if (newProfile) {
         setIsAdmin(false)
@@ -166,8 +175,8 @@ export default function StratBook() {
     setStats({ strategies: stratCount || 0, users: users?.length || 0 });
   }
 
-  async function updateUserRole(userId: string, newRole: string) {
-    const { error } = await supabase.from('profiles').update({ role: newRole }).eq('id', userId);
+  async function updateUserRole(userId: string, isAdminValue: boolean) {
+    const { error } = await supabase.from('profiles').update({ is_admin: isAdminValue }).eq('id', userId);
     if (!error) fetchAdminData();
     else alert("Erreur lors de la mise à jour du rôle");
   }
@@ -750,20 +759,19 @@ export default function StratBook() {
                       <td style={{ padding: "15px 20px", fontSize: "0.9rem" }}>{u.id.substring(0, 8)}... (UUID)</td>
                       <td style={{ padding: "15px 20px" }}>
                         <span style={{ 
-                          background: u.role === 'Admin' ? "rgba(255,70,85,0.2)" : u.role === 'Coach' ? "rgba(78, 168, 222, 0.2)" : "rgba(255,255,255,0.1)",
-                          color: u.role === 'Admin' ? "#ff4655" : u.role === 'Coach' ? "#4ea8de" : "#aaa",
+                          background: u.is_admin ? "rgba(255,70,85,0.2)" : "rgba(255,255,255,0.1)",
+                          color: u.is_admin ? "#ff4655" : "#aaa",
                           padding: "4px 10px", borderRadius: "4px", fontSize: "0.7rem", fontWeight: "bold"
-                        }}>{u.role.toUpperCase()}</span>
+                        }}>{u.is_admin ? 'ADMIN' : 'JOUEUR'}</span>
                       </td>
                       <td style={{ padding: "15px 20px" }}>
                         <select 
-                          value={u.role} 
-                          onChange={(e) => updateUserRole(u.id, e.target.value)}
+                          value={u.is_admin ? 'true' : 'false'} 
+                          onChange={(e) => updateUserRole(u.id, e.target.value === 'true')}
                           style={{ background: "#1a2531", border: "1px solid #333", color: "white", padding: "5px 10px", borderRadius: "4px", fontSize: "0.8rem" }}
                         >
-                          <option value="Joueur">JOUEUR</option>
-                          <option value="Coach">COACH</option>
-                          <option value="Admin">ADMIN</option>
+                          <option value="false">JOUEUR</option>
+                          <option value="true">ADMIN</option>
                         </select>
                       </td>
                     </tr>
