@@ -141,7 +141,7 @@ export default function StratBook() {
 
   async function fetchUserProfile(userId: string) {
     console.log("Fetching profile for user ID:", userId);
-    const { data, error: fetchError } = await supabase.from('profiles').select('is_admin').eq('id', userId).maybeSingle()
+    const { data, error: fetchError } = await supabase.from('profiles').select('is_admin, role').eq('id', userId).maybeSingle()
     
     if (fetchError) {
       console.error("Error fetching profile:", fetchError);
@@ -151,7 +151,7 @@ export default function StratBook() {
     console.log("Profile data found in DB:", data);
     
     if (data) {
-      const isUserAdmin = data.is_admin === true;
+      const isUserAdmin = data.is_admin === true || data.role === 'Admin';
       console.log("User is Admin?", isUserAdmin);
       setIsAdmin(isUserAdmin)
       setIsCoachOrAdmin(isUserAdmin)
