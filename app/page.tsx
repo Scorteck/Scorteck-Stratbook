@@ -395,7 +395,7 @@ export default function StratBook() {
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
         
         <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: `2px solid ${accentColor}`, width: "400px", boxShadow: `0 0 50px ${accentColor}33`, transition: "all 0.3s ease" }}>
-          <h1 style={{ color: accentColor, textAlign: "center", margin: "0 0 30px 0", fontWeight: "900", letterSpacing: "3px" }}>SCORTECK STRATBOOK</h1>
+          <h1 style={{ color: accentColor, textAlign: "center", margin: "0 0 30px 0", fontWeight: "900", letterSpacing: "3px" }}>SCORTECK TEST</h1>
           
           <div style={{ display: "flex", marginBottom: "30px", borderBottom: "1px solid #333" }}>
             <button onClick={() => { setAuthView("login"); setIsVerifyStep(false); setAuthError(null); }} style={{ flex: 1, background: "none", border: "none", color: authView === "login" ? "#ff4655" : "#666", padding: "10px", fontWeight: "bold", cursor: "pointer", borderBottom: authView === "login" ? "2px solid #ff4655" : "none" }}>LOGIN</button>
