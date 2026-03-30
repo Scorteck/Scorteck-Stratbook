@@ -113,6 +113,10 @@ export default function StratBook() {
   const [authPassword, setAuthPassword] = useState("")
   const [authError, setAuthError] = useState<string | null>(null)
   const [isVerifyStep, setIsVerifyStep] = useState(false)
+  const [displayName, setDisplayName] = useState("")
+  const [userTeam, setUserTeam] = useState<{ id: string, name: string } | null>(null)
+  const [onboardingStep, setOnboardingStep] = useState<"pseudo" | "team" | "none">("pseudo")
+  const [newTeamName, setNewTeamName] = useState("")
   const [allUsers, setAllUsers] = useState<any[]>([])
   const [stats, setStats] = useState({ strategies: 0, users: 0 })
 
@@ -140,29 +144,105 @@ export default function StratBook() {
   useEffect(() => { if (view === "admin") fetchAdminData() }, [view])
 
   async function fetchUserProfile(userId: string) {
-    console.log("Fetching profile for user ID:", userId);
-    const { data, error: fetchError } = await supabase.from('profiles').select('is_admin, role').eq('id', userId).maybeSingle()
+    console.log("Onboarding: Démarrage de la récupération du profil pour", userId);
+    
+    // On retire 'role' car la colonne n'existe pas et fait crash la requête (Erreur 400)
+    const { data, error: fetchError } = await supabase
+      .from('profiles')
+      .select('is_admin, display_name')
+      .eq('id', userId)
+      .maybeSingle()
     
     if (fetchError) {
-      console.error("Error fetching profile:", fetchError);
+      console.error("Onboarding Error: Erreur lors de la lecture du profil", fetchError);
+      // Même en cas d'erreur, on laisse l'utilisateur choisir un pseudo par défaut
+      setOnboardingStep("pseudo");
       return;
     }
     
-    console.log("Profile data found in DB:", data);
+    console.log("Onboarding: Données reçues du profil:", data);
     
     if (data) {
-      const isUserAdmin = data.is_admin === true || data.role === 'Admin';
-      console.log("User is Admin?", isUserAdmin);
-      setIsAdmin(isUserAdmin)
-      setIsCoachOrAdmin(isUserAdmin)
-    } else {
-      console.log("No profile found, creating default Joueur profile...");
-      const { data: newProfile, error: insertError } = await supabase.from('profiles').insert([{ id: userId, is_admin: false }]).select().single()
-      if (insertError) console.error("Error inserting profile:", insertError)
-      if (newProfile) {
-        setIsAdmin(false)
-        setIsCoachOrAdmin(false)
+      setIsAdmin(data.is_admin === true);
+      setIsCoachOrAdmin(data.is_admin === true);
+      
+      if (data.display_name && data.display_name.trim() !== "") {
+        console.log("Onboarding: Pseudo trouvé, passage à la vérification d'équipe...");
+        setDisplayName(data.display_name);
+        checkUserTeam(userId);
+      } else {
+        console.log("Onboarding: Pas de pseudo trouvé, affichage de l'écran Pseudo");
+        setOnboardingStep("pseudo");
       }
+    } else {
+      console.log("Onboarding: Aucun profil en base, création du profil par défaut...");
+      const { data: newProfile, error: insertError } = await supabase
+        .from('profiles')
+        .insert([{ id: userId, is_admin: false }])
+        .select()
+        .maybeSingle()
+
+      if (insertError) console.error("Onboarding Error: Impossible de créer le profil par défaut", insertError);
+      
+      console.log("Onboarding: Profil créé ou existant, affichage de l'écran Pseudo");
+      setOnboardingStep("pseudo");
+    }
+  }
+
+  async function checkUserTeam(userId: string) {
+    console.log("Onboarding: Vérification de l'appartenance à une équipe...");
+    const { data: memberData, error: memberError } = await supabase
+      .from('team_members')
+      .select('team_id, teams(id, name)')
+      .eq('user_id', userId)
+      .maybeSingle();
+
+    if (memberError) {
+      console.error("Onboarding Error: Erreur lors du check équipe", memberError);
+      setOnboardingStep("team");
+      return;
+    }
+
+    if (memberData && memberData.teams) {
+      console.log("Onboarding: Équipe trouvée !", memberData.teams);
+      // @ts-ignore
+      setUserTeam(memberData.teams);
+      setOnboardingStep("none");
+    } else {
+      console.log("Onboarding: Pas d'équipe trouvée, affichage de l'écran Équipe");
+      setOnboardingStep("team");
+    }
+  }
+
+  async function updateDisplayName() {
+    if (!displayName.trim() || !session) return;
+    const { error } = await supabase.from('profiles').update({ display_name: displayName }).eq('id', session.user.id);
+    if (!error) checkUserTeam(session.user.id);
+    else alert("Erreur lors de la mise à jour du pseudo");
+  }
+
+  async function createTeam() {
+    if (!newTeamName.trim() || !session) return;
+    
+    // 1. Créer l'équipe
+    const { data: teamData, error: teamError } = await supabase
+      .from('teams')
+      .insert([{ name: newTeamName }])
+      .select()
+      .single();
+
+    if (teamError) return alert("Erreur lors de la création de l'équipe");
+
+    // 2. Ajouter l'utilisateur comme owner
+    const { error: memberError } = await supabase
+      .from('team_members')
+      .insert([{ team_id: teamData.id, user_id: session.user.id, role: 'owner' }]);
+
+    if (!memberError) {
+      setUserTeam(teamData);
+      setOnboardingStep("none");
+    } else {
+      alert("Erreur lors de l'adhésion à l'équipe");
     }
   }
 
@@ -503,14 +583,81 @@ export default function StratBook() {
     );
   }
 
+  // --- ONBOARDING : PSEUDO ---
+  if (onboardingStep === "pseudo") {
+    return (
+      <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+        <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
+        <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: "2px solid #ff4655", width: "400px", textAlign: "center" }}>
+          <h2 style={{ color: "#ff4655", fontWeight: "900", letterSpacing: "2px", marginBottom: "25px" }}>IDENTIFICATION REQUISE</h2>
+          <p style={{ color: "#ccc", fontSize: "0.9rem", marginBottom: "30px" }}>Choisissez le nom qui apparaîtra sur vos rapports tactiques.</p>
+          <input 
+            type="text" 
+            placeholder="VOTRE PSEUDO..." 
+            value={displayName} 
+            onChange={(e) => setDisplayName(e.target.value)} 
+            style={{ width: "100%", background: "#1a2531", border: "1px solid #333", color: "white", padding: "15px", borderRadius: "4px", marginBottom: "20px", textAlign: "center", fontWeight: "bold" }} 
+          />
+          <button onClick={updateDisplayName} style={{ width: "100%", background: "#ff4655", color: "white", padding: "15px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer" }}>DÉPLOYER</button>
+        </div>
+      </div>
+    );
+  }
+
+  // --- ONBOARDING : ÉQUIPE ---
+  if (onboardingStep === "team") {
+    return (
+      <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+        <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
+        <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: "2px solid #ff4655", width: "500px", textAlign: "center" }}>
+          <h2 style={{ color: "#ff4655", fontWeight: "900", letterSpacing: "2px", marginBottom: "10px" }}>BIENVENUE, {displayName.toUpperCase()}</h2>
+          <p style={{ color: "#ccc", fontSize: "0.9rem", marginBottom: "40px" }}>Pour accéder aux archives, vous devez appartenir à une unité.</p>
+          
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+            <div style={{ background: "rgba(255,255,255,0.03)", padding: "20px", borderRadius: "10px", border: "1px solid #333" }}>
+              <h3 style={{ fontSize: "0.8rem", color: "#ff4655", marginBottom: "15px" }}>NOUVELLE UNITÉ</h3>
+              <input 
+                type="text" 
+                placeholder="NOM DE L'ÉQUIPE" 
+                value={newTeamName}
+                onChange={(e) => setNewTeamName(e.target.value)}
+                style={{ width: "100%", background: "#0f1923", border: "1px solid #444", color: "white", padding: "10px", borderRadius: "4px", marginBottom: "15px", fontSize: "0.8rem" }}
+              />
+              <button onClick={createTeam} style={{ width: "100%", background: "#ff4655", color: "white", padding: "10px", border: "none", borderRadius: "4px", fontWeight: "bold", cursor: "pointer", fontSize: "0.7rem" }}>CRÉER</button>
+            </div>
+            
+            <div style={{ background: "rgba(255,255,255,0.03)", padding: "20px", borderRadius: "10px", border: "1px solid #333", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+              <h3 style={{ fontSize: "0.8rem", color: "#00f2ff", marginBottom: "15px" }}>REJOINDRE</h3>
+              <p style={{ fontSize: "0.7rem", color: "#666", marginBottom: "15px" }}>Demandez un lien d'invitation à votre capitaine.</p>
+              <button disabled style={{ width: "100%", background: "rgba(255,255,255,0.05)", color: "#444", padding: "10px", border: "1px solid #333", borderRadius: "4px", fontWeight: "bold", cursor: "not-allowed", fontSize: "0.7rem" }}>BIENTÔT DISPONIBLE</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", position: "relative", fontFamily: 'sans-serif' }}>
       
       <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
 
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "15px 40px", borderBottom: "2px solid #ff4655", position: "fixed", top: 0, left: 0, width: "100%", zIndex: 1000, background: "rgba(10, 15, 20, 0.95)" }}>
-        <h1 style={{ color: "#ff4655", margin: 0, fontWeight: "900", cursor: "pointer", fontSize: "1.4rem", letterSpacing: "2px" }} onClick={() => setView("home")}>SCORTECK STRATBOOK</h1>
-        {session && <button onClick={() => supabase.auth.signOut()} style={{background: "#ff4655", border: "none", color: "white", padding: "8px 15px", borderRadius: "4px", cursor: "pointer", fontWeight: "bold"}}>LOGOUT</button>}
+        <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+          <h1 style={{ color: "#ff4655", margin: 0, fontWeight: "900", cursor: "pointer", fontSize: "1.4rem", letterSpacing: "2px" }} onClick={() => setView("home")}>SCORTECK STRATBOOK</h1>
+          {userTeam && (
+            <div style={{ background: "rgba(255,70,85,0.1)", padding: "5px 15px", borderRadius: "4px", border: "1px solid #ff4655" }}>
+              <span style={{ color: "#ff4655", fontSize: "0.7rem", fontWeight: "900", letterSpacing: "1px" }}>UNITÉ : {userTeam.name.toUpperCase()}</span>
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
+          <div style={{ textAlign: "right" }}>
+            <p style={{ margin: 0, fontSize: "0.8rem", fontWeight: "900", color: "white" }}>{displayName.toUpperCase()}</p>
+            <p style={{ margin: 0, fontSize: "0.6rem", color: "#666" }}>{isAdmin ? "ADMINISTRATEUR" : "OPÉRATEUR"}</p>
+          </div>
+          <button onClick={() => supabase.auth.signOut()} style={{ background: "transparent", border: "1px solid #333", color: "#666", padding: "8px 15px", borderRadius: "4px", cursor: "pointer", fontSize: "0.7rem", fontWeight: "bold", transition: "0.2s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = "#ff4655"; e.currentTarget.style.color = "#ff4655"; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "#333"; e.currentTarget.style.color = "#666"; }}>DÉCONNEXION</button>
+        </div>
       </header>
 
       {/* NAVIGATION COULISSANTE (SANS BARRE DE SCROLL) */}
