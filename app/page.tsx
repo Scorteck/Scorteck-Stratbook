@@ -90,10 +90,11 @@ const AGENT_ICON_BASE_URL = "https://dsqlvperlkpdzcmjcvpj.supabase.co/storage/v1
 const BACKGROUND_URL = "https://dsqlvperlkpdzcmjcvpj.supabase.co/storage/v1/object/public/Image%20map/Valorant%20Background.jpg";
 
 export default function StratBook() {
-  const [view, setView] = useState<"home" | "map" | "admin">("home")
+  const [view, setView] = useState<"home" | "map" | "admin" | "team-menu">("home")
   const [activeMap, setActiveMap] = useState<MapData | null>(null)
   const [maps, setMaps] = useState<MapData[]>([])
   const [loading, setLoading] = useState(true)
+  const [profileLoading, setProfileLoading] = useState(true)
   const [session, setSession] = useState<Session | null>(null)
   const [isAdmin, setIsAdmin] = useState(false)
   const [isCoachOrAdmin, setIsCoachOrAdmin] = useState(false)
@@ -114,11 +115,18 @@ export default function StratBook() {
   const [authError, setAuthError] = useState<string | null>(null)
   const [isVerifyStep, setIsVerifyStep] = useState(false)
   const [displayName, setDisplayName] = useState("")
-  const [userTeam, setUserTeam] = useState<{ id: string, name: string } | null>(null)
+  const [userTeam, setUserTeam] = useState<{ id: string, name: string, join_code?: string } | null>(null)
   const [onboardingStep, setOnboardingStep] = useState<"pseudo" | "team" | "none">("pseudo")
   const [newTeamName, setNewTeamName] = useState("")
+  const [joinCode, setJoinCode] = useState("")
   const [allUsers, setAllUsers] = useState<any[]>([])
   const [stats, setStats] = useState({ strategies: 0, users: 0 })
+  const [isOnboardingLoading, setIsOnboardingLoading] = useState(false)
+  
+  // États pour le Planning
+  const [teamMembers, setTeamMembers] = useState<any[]>([])
+  const [availabilityData, setAvailabilityData] = useState<Record<string, any>>({})
+  const [praccSchedule, setPraccSchedule] = useState<any[]>([])
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -142,6 +150,99 @@ export default function StratBook() {
   useEffect(() => { if (activeMap) fetchCompositions(activeMap.id) }, [activeMap])
   useEffect(() => { if (selectedCompo && selectedSide && activeTab) fetchStrategies() }, [selectedCompo, selectedSide, activeTab])
   useEffect(() => { if (view === "admin") fetchAdminData() }, [view])
+  useEffect(() => { if (view === "team-menu" && userTeam) fetchTeamMenuData() }, [view, userTeam])
+
+  async function fetchTeamMenuData() {
+    if (!userTeam) return;
+    
+    // 1. Récupérer les membres de l'équipe
+    const { data: members, error: membersError } = await supabase
+      .from('team_members')
+      .select('user_id, role, profiles(display_name)')
+      .eq('team_id', userTeam.id);
+    
+    if (members) setTeamMembers(members);
+    
+    // 2. Récupérer les dispos
+    const { data: availability } = await supabase
+      .from('team_availability')
+      .select('*')
+      .eq('team_id', userTeam.id);
+    
+    // Transformer en map [userId][day][hour] = boolean
+    const availabilityMap: Record<string, any> = {};
+    availability?.forEach(item => {
+      if (!availabilityMap[item.user_id]) availabilityMap[item.user_id] = {};
+      if (!availabilityMap[item.user_id][item.day]) availabilityMap[item.user_id][item.day] = {};
+      availabilityMap[item.user_id][item.day][item.hour] = item.is_available;
+    });
+    setAvailabilityData(availabilityMap);
+
+    // 3. Récupérer le planning Pracc
+    const { data: pracc } = await supabase
+      .from('team_schedules')
+      .select('*')
+      .eq('team_id', userTeam.id)
+      .order('day', { ascending: true })
+      .order('hour', { ascending: true });
+    
+    setPraccSchedule(pracc || []);
+  }
+
+  async function toggleAvailability(day: string, hour: string) {
+    if (!session || !userTeam) return;
+    
+    const current = availabilityData[session.user.id]?.[day]?.[hour] || false;
+    const nextValue = !current;
+
+    // Mise à jour optimiste UI
+    const newMap = { ...availabilityData };
+    if (!newMap[session.user.id]) newMap[session.user.id] = {};
+    if (!newMap[session.user.id][day]) newMap[session.user.id][day] = {};
+    newMap[session.user.id][day][hour] = nextValue;
+    setAvailabilityData(newMap);
+
+    // Sauvegarde DB
+    const { error } = await supabase
+      .from('team_availability')
+      .upsert({
+        team_id: userTeam.id,
+        user_id: session.user.id,
+        day,
+        hour,
+        is_available: nextValue
+      }, { onConflict: 'team_id,user_id,day,hour' });
+    
+    if (error) {
+      console.error("Error saving availability:", error);
+      fetchTeamMenuData(); // Rollback en cas d'erreur
+    }
+  }
+
+  async function updatePraccSchedule(day: string, hour: string, activity: string) {
+    if (!session || !userTeam || !isCoachOrAdmin) return;
+
+    // Mise à jour optimiste
+    const newPracc = [...praccSchedule.filter(p => !(p.day === day && p.hour === hour))];
+    if (activity) {
+      newPracc.push({ team_id: userTeam.id, day, hour, activity_type: activity });
+    }
+    setPraccSchedule(newPracc);
+
+    const { error } = await supabase
+      .from('team_schedules')
+      .upsert({
+        team_id: userTeam.id,
+        day,
+        hour,
+        activity_type: activity
+      }, { onConflict: 'team_id,day,hour' });
+    
+    if (error) {
+      console.error("Error saving pracc schedule:", error);
+      fetchTeamMenuData();
+    }
+  }
 
   async function fetchUserProfile(userId: string) {
     console.log("Onboarding: Démarrage de la récupération du profil pour", userId);
@@ -157,6 +258,7 @@ export default function StratBook() {
       console.error("Onboarding Error: Erreur lors de la lecture du profil", fetchError);
       // Même en cas d'erreur, on laisse l'utilisateur choisir un pseudo par défaut
       setOnboardingStep("pseudo");
+      setProfileLoading(false);
       return;
     }
     
@@ -173,6 +275,7 @@ export default function StratBook() {
       } else {
         console.log("Onboarding: Pas de pseudo trouvé, affichage de l'écran Pseudo");
         setOnboardingStep("pseudo");
+        setProfileLoading(false);
       }
     } else {
       console.log("Onboarding: Aucun profil en base, création du profil par défaut...");
@@ -186,6 +289,22 @@ export default function StratBook() {
       
       console.log("Onboarding: Profil créé ou existant, affichage de l'écran Pseudo");
       setOnboardingStep("pseudo");
+      setProfileLoading(false);
+    }
+  }
+
+  async function updateDisplayName() {
+    if (!displayName.trim() || !session) return;
+    
+    const { error } = await supabase
+      .from('profiles')
+      .update({ display_name: displayName.trim() })
+      .eq('id', session.user.id);
+
+    if (error) {
+      alert("Erreur lors de la mise à jour du pseudo : " + error.message);
+    } else {
+      checkUserTeam(session.user.id);
     }
   }
 
@@ -193,45 +312,51 @@ export default function StratBook() {
     console.log("Onboarding: Vérification de l'appartenance à une équipe...");
     const { data: memberData, error: memberError } = await supabase
       .from('team_members')
-      .select('team_id, teams(id, name)')
+      .select('team_id, teams(id, name, join_code)')
       .eq('user_id', userId)
       .maybeSingle();
 
     if (memberError) {
       console.error("Onboarding Error: Erreur lors du check équipe", memberError);
       setOnboardingStep("team");
+      setProfileLoading(false);
       return;
     }
 
     if (memberData && memberData.teams) {
       console.log("Onboarding: Équipe trouvée !", memberData.teams);
-      // @ts-ignore
-      setUserTeam(memberData.teams);
+      const team = Array.isArray(memberData.teams) ? memberData.teams[0] : memberData.teams;
+      setUserTeam(team as { id: string, name: string, join_code?: string });
       setOnboardingStep("none");
     } else {
       console.log("Onboarding: Pas d'équipe trouvée, affichage de l'écran Équipe");
       setOnboardingStep("team");
     }
-  }
-
-  async function updateDisplayName() {
-    if (!displayName.trim() || !session) return;
-    const { error } = await supabase.from('profiles').update({ display_name: displayName }).eq('id', session.user.id);
-    if (!error) checkUserTeam(session.user.id);
-    else alert("Erreur lors de la mise à jour du pseudo");
+    setProfileLoading(false);
   }
 
   async function createTeam() {
     if (!newTeamName.trim() || !session) return;
+    setIsOnboardingLoading(true);
+    console.log("TeamCreation: Démarrage de la création d'équipe pour", newTeamName);
     
+    // Générer un code unique (ex: VAL-1234)
+    const generatedCode = "VAL-" + Math.floor(1000 + Math.random() * 9000);
+
     // 1. Créer l'équipe
     const { data: teamData, error: teamError } = await supabase
       .from('teams')
-      .insert([{ name: newTeamName }])
+      .insert([{ name: newTeamName, join_code: generatedCode }])
       .select()
-      .single();
+      .maybeSingle();
 
-    if (teamError) return alert("Erreur lors de la création de l'équipe");
+    if (teamError || !teamData) {
+      console.error("TeamCreation Error: Échec de l'insertion dans 'teams'", teamError);
+      setIsOnboardingLoading(false);
+      return alert("Erreur lors de la création de l'équipe : " + (teamError?.message || "Données non retournées"));
+    }
+
+    console.log("TeamCreation: Équipe créée avec succès", teamData);
 
     // 2. Ajouter l'utilisateur comme owner
     const { error: memberError } = await supabase
@@ -239,11 +364,44 @@ export default function StratBook() {
       .insert([{ team_id: teamData.id, user_id: session.user.id, role: 'owner' }]);
 
     if (!memberError) {
+      console.log("TeamCreation: Utilisateur ajouté comme owner");
       setUserTeam(teamData);
       setOnboardingStep("none");
     } else {
-      alert("Erreur lors de l'adhésion à l'équipe");
+      console.error("TeamCreation Error: Échec de l'insertion dans 'team_members'", memberError);
+      alert("Erreur lors de l'adhésion à l'équipe : " + memberError.message);
     }
+    setIsOnboardingLoading(false);
+  }
+
+  async function joinTeam() {
+    if (!joinCode.trim() || !session) return;
+    setIsOnboardingLoading(true);
+
+    // 1. Chercher l'équipe via le code
+    const { data: teamData, error: teamError } = await supabase
+      .from('teams')
+      .select('*')
+      .eq('join_code', joinCode.trim().toUpperCase())
+      .maybeSingle();
+
+    if (teamError || !teamData) {
+      setIsOnboardingLoading(false);
+      return alert("Code invalide ou équipe introuvable.");
+    }
+
+    // 2. Ajouter l'utilisateur à l'équipe
+    const { error: memberError } = await supabase
+      .from('team_members')
+      .insert([{ team_id: teamData.id, user_id: session.user.id, role: 'member' }]);
+
+    if (!memberError) {
+      setUserTeam(teamData);
+      setOnboardingStep("none");
+    } else {
+      alert("Erreur lors de la tentative de rejoindre l'équipe.");
+    }
+    setIsOnboardingLoading(false);
   }
 
   async function fetchAdminData() {
@@ -464,7 +622,28 @@ export default function StratBook() {
     else fetchStrategies(); // Rafraîchit la liste
   }
 
+  async function resetMyProfile() {
+    if (!session || !confirm("Voulez-vous vraiment réinitialiser votre profil et votre équipe pour retester l'onboarding ?")) return;
+    
+    // 1. Quitter l'équipe
+    await supabase.from('team_members').delete().eq('user_id', session.user.id);
+    
+    // 2. Effacer le pseudo
+    await supabase.from('profiles').update({ display_name: null }).eq('id', session.user.id);
+    
+    // 3. Recharger
+    window.location.reload();
+  }
+
   const getIconUrl = (agentName: string) => `${AGENT_ICON_BASE_URL}${agentName}_icon.webp`;
+
+  if (profileLoading && session) return (
+    <div style={{background: "#0f1923", color: "white", height: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "20px"}}>
+      <div style={{fontSize: "1.5rem", fontWeight: "900", letterSpacing: "2px", animation: "pulse 1.5s infinite"}}>SYNCHRONISATION...</div>
+      <button onClick={resetMyProfile} style={{ background: "transparent", border: "1px solid #ff4655", color: "#ff4655", padding: "10px 20px", borderRadius: "4px", cursor: "pointer", fontSize: "0.8rem", fontWeight: "bold" }}>RÉINITIALISER SI BLOQUÉ</button>
+      <button onClick={() => supabase.auth.signOut()} style={{ color: "#666", background: "none", border: "none", cursor: "pointer", textDecoration: "underline" }}>Se déconnecter</button>
+    </div>
+  )
 
   if (loading) return <div style={{background: "#0f1923", color: "white", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center"}}>CHARGEMENT DU SYSTÈME...</div>
 
@@ -472,6 +651,16 @@ export default function StratBook() {
     const accentColor = authView === "login" ? "#ff4655" : "#00f2ff";
     return (
       <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", position: "relative", fontFamily: 'sans-serif' }}>
+        <button 
+          onClick={() => {
+            // Un petit hack pour forcer le nettoyage même sans session si besoin
+            localStorage.clear();
+            window.location.reload();
+          }} 
+          style={{ position: "fixed", bottom: "20px", right: "20px", zIndex: 9999, background: "#333", color: "white", border: "1px solid #444", padding: "10px 20px", borderRadius: "50px", fontSize: "0.7rem", cursor: "pointer" }}
+        >
+          REFRESH APP
+        </button>
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
         
         <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: `2px solid ${accentColor}`, width: "400px", boxShadow: `0 0 50px ${accentColor}33`, transition: "all 0.3s ease" }}>
@@ -588,7 +777,7 @@ export default function StratBook() {
     return (
       <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
-        <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: "2px solid #ff4655", width: "400px", textAlign: "center" }}>
+        <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: "2px solid #ff4655", width: "400px", textAlign: "center", boxShadow: "0 0 50px rgba(255, 70, 85, 0.3)", transition: "all 0.5s ease" }}>
           <h2 style={{ color: "#ff4655", fontWeight: "900", letterSpacing: "2px", marginBottom: "25px" }}>IDENTIFICATION REQUISE</h2>
           <p style={{ color: "#ccc", fontSize: "0.9rem", marginBottom: "30px" }}>Choisissez le nom qui apparaîtra sur vos rapports tactiques.</p>
           <input 
@@ -596,9 +785,21 @@ export default function StratBook() {
             placeholder="VOTRE PSEUDO..." 
             value={displayName} 
             onChange={(e) => setDisplayName(e.target.value)} 
+            disabled={isOnboardingLoading}
             style={{ width: "100%", background: "#1a2531", border: "1px solid #333", color: "white", padding: "15px", borderRadius: "4px", marginBottom: "20px", textAlign: "center", fontWeight: "bold" }} 
           />
-          <button onClick={updateDisplayName} style={{ width: "100%", background: "#ff4655", color: "white", padding: "15px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer" }}>DÉPLOYER</button>
+          <button 
+            onClick={async () => {
+              setIsOnboardingLoading(true);
+              await updateDisplayName();
+              setIsOnboardingLoading(false);
+            }} 
+            disabled={isOnboardingLoading || !displayName.trim()}
+            style={{ width: "100%", background: "#ff4655", color: "white", padding: "15px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer", opacity: (isOnboardingLoading || !displayName.trim()) ? 0.5 : 1 }}
+          >
+            {isOnboardingLoading ? "DÉPLOYMENT..." : "DÉPLOYER"}
+          </button>
+          <button onClick={resetMyProfile} style={{ marginTop: "20px", background: "none", border: "none", color: "#666", fontSize: "0.7rem", cursor: "pointer", textDecoration: "underline" }}>Réinitialiser mon compte de test</button>
         </div>
       </div>
     );
@@ -609,28 +810,64 @@ export default function StratBook() {
     return (
       <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
         <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
-        <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: "2px solid #ff4655", width: "500px", textAlign: "center" }}>
+        <div style={{ zIndex: 10, background: "rgba(10, 15, 20, 0.95)", padding: "40px", borderRadius: "15px", border: "2px solid #ff4655", width: "600px", textAlign: "center", boxShadow: "0 0 50px rgba(255, 70, 85, 0.3)", transition: "all 0.5s ease" }}>
           <h2 style={{ color: "#ff4655", fontWeight: "900", letterSpacing: "2px", marginBottom: "10px" }}>BIENVENUE, {displayName.toUpperCase()}</h2>
-          <p style={{ color: "#ccc", fontSize: "0.9rem", marginBottom: "40px" }}>Pour accéder aux archives, vous devez appartenir à une unité.</p>
+          <p style={{ color: "#ccc", fontSize: "0.9rem", marginBottom: "40px" }}>Pour accéder aux archives, vous pouvez rejoindre une équipe ou en créer une nouvelle.</p>
           
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
-            <div style={{ background: "rgba(255,255,255,0.03)", padding: "20px", borderRadius: "10px", border: "1px solid #333" }}>
-              <h3 style={{ fontSize: "0.8rem", color: "#ff4655", marginBottom: "15px" }}>NOUVELLE UNITÉ</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", marginBottom: "30px" }}>
+            {/* CRÉATION D'ÉQUIPE */}
+            <div style={{ background: "rgba(255,255,255,0.03)", padding: "20px", borderRadius: "10px", border: "1px solid #333", display: "flex", flexDirection: "column" }}>
+              <h3 style={{ fontSize: "0.8rem", color: "#ff4655", marginBottom: "15px", fontWeight: "900", letterSpacing: "1px" }}>CRÉER UNE ÉQUIPE</h3>
               <input 
                 type="text" 
                 placeholder="NOM DE L'ÉQUIPE" 
                 value={newTeamName}
                 onChange={(e) => setNewTeamName(e.target.value)}
-                style={{ width: "100%", background: "#0f1923", border: "1px solid #444", color: "white", padding: "10px", borderRadius: "4px", marginBottom: "15px", fontSize: "0.8rem" }}
+                disabled={isOnboardingLoading}
+                style={{ width: "100%", background: "#0f1923", border: "1px solid #444", color: "white", padding: "12px", borderRadius: "4px", marginBottom: "15px", fontSize: "0.8rem", textAlign: "center" }}
               />
-              <button onClick={createTeam} style={{ width: "100%", background: "#ff4655", color: "white", padding: "10px", border: "none", borderRadius: "4px", fontWeight: "bold", cursor: "pointer", fontSize: "0.7rem" }}>CRÉER</button>
+              <button 
+                onClick={createTeam} 
+                disabled={isOnboardingLoading || !newTeamName.trim()}
+                style={{ width: "100%", background: "#ff4655", color: "white", padding: "12px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer", fontSize: "0.75rem", letterSpacing: "1px", marginTop: "auto", opacity: (isOnboardingLoading || !newTeamName.trim()) ? 0.5 : 1 }}
+              >
+                {isOnboardingLoading ? "CRÉATION..." : "CRÉER ÉQUIPE"}
+              </button>
             </div>
             
-            <div style={{ background: "rgba(255,255,255,0.03)", padding: "20px", borderRadius: "10px", border: "1px solid #333", display: "flex", flexDirection: "column", justifyContent: "center" }}>
-              <h3 style={{ fontSize: "0.8rem", color: "#00f2ff", marginBottom: "15px" }}>REJOINDRE</h3>
-              <p style={{ fontSize: "0.7rem", color: "#666", marginBottom: "15px" }}>Demandez un lien d'invitation à votre capitaine.</p>
-              <button disabled style={{ width: "100%", background: "rgba(255,255,255,0.05)", color: "#444", padding: "10px", border: "1px solid #333", borderRadius: "4px", fontWeight: "bold", cursor: "not-allowed", fontSize: "0.7rem" }}>BIENTÔT DISPONIBLE</button>
+            {/* REJOINDRE UNE ÉQUIPE */}
+            <div style={{ background: "rgba(255,255,255,0.03)", padding: "20px", borderRadius: "10px", border: "1px solid #333", display: "flex", flexDirection: "column" }}>
+              <h3 style={{ fontSize: "0.8rem", color: "#00f2ff", marginBottom: "15px", fontWeight: "900", letterSpacing: "1px" }}>REJOINDRE UNE ÉQUIPE</h3>
+              <input 
+                type="text" 
+                placeholder="CODE : VAL-XXXX" 
+                value={joinCode}
+                onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                disabled={isOnboardingLoading}
+                style={{ width: "100%", background: "#0f1923", border: "1px solid #444", color: "white", padding: "12px", borderRadius: "4px", marginBottom: "15px", fontSize: "0.8rem", textAlign: "center" }}
+              />
+              <button 
+                onClick={joinTeam} 
+                disabled={isOnboardingLoading || joinCode.length < 5}
+                style={{ width: "100%", background: "#00f2ff", color: "#0f1923", padding: "12px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer", fontSize: "0.75rem", letterSpacing: "1px", marginTop: "auto", opacity: (isOnboardingLoading || joinCode.length < 5) ? 0.5 : 1 }}
+              >
+                {isOnboardingLoading ? "RECHERCHE..." : "REJOINDRE"}
+              </button>
             </div>
+          </div>
+
+          {/* CONTINUER EN SOLO */}
+          <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: "20px", display: "flex", flexDirection: "column", gap: "15px" }}>
+            <button 
+              onClick={() => setOnboardingStep("none")} 
+              disabled={isOnboardingLoading}
+              style={{ background: "transparent", border: "1px solid #333", color: "#666", padding: "10px 25px", borderRadius: "4px", cursor: "pointer", fontSize: "0.75rem", fontWeight: "bold", transition: "0.2s", opacity: isOnboardingLoading ? 0.5 : 1 }}
+              onMouseEnter={e => { if(!isOnboardingLoading) { e.currentTarget.style.borderColor = "#fff"; e.currentTarget.style.color = "#fff"; } }}
+              onMouseLeave={e => { if(!isOnboardingLoading) { e.currentTarget.style.borderColor = "#333"; e.currentTarget.style.color = "#666"; } }}
+            >
+              CONTINUER SANS ÉQUIPE (SOLO)
+            </button>
+            <button onClick={resetMyProfile} style={{ background: "none", border: "none", color: "#444", fontSize: "0.7rem", cursor: "pointer", textDecoration: "underline" }}>Réinitialiser mon compte de test</button>
           </div>
         </div>
       </div>
@@ -640,14 +877,33 @@ export default function StratBook() {
   return (
     <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", position: "relative", fontFamily: 'sans-serif' }}>
       
+      {/* BANDEAU DE TEST FORCÉ */}
+      <div style={{ position: "fixed", top: 0, left: 0, right: 0, height: "3px", background: "#ff4655", zIndex: 9999 }} />
+      <button 
+        onClick={resetMyProfile} 
+        style={{ position: "fixed", bottom: "20px", right: "20px", zIndex: 9999, background: "#ff4655", color: "white", border: "none", padding: "15px 25px", borderRadius: "50px", fontWeight: "900", cursor: "pointer", boxShadow: "0 10px 30px rgba(255,70,85,0.5)", border: "2px solid white" }}
+      >
+        ⚠️ RÉINITIALISER TOUT (DEBUG)
+      </button>
+
       <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
 
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "15px 40px", borderBottom: "2px solid #ff4655", position: "fixed", top: 0, left: 0, width: "100%", zIndex: 1000, background: "rgba(10, 15, 20, 0.95)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
           <h1 style={{ color: "#ff4655", margin: 0, fontWeight: "900", cursor: "pointer", fontSize: "1.4rem", letterSpacing: "2px" }} onClick={() => setView("home")}>SCORTECK STRATBOOK</h1>
           {userTeam && (
-            <div style={{ background: "rgba(255,70,85,0.1)", padding: "5px 15px", borderRadius: "4px", border: "1px solid #ff4655" }}>
-              <span style={{ color: "#ff4655", fontSize: "0.7rem", fontWeight: "900", letterSpacing: "1px" }}>UNITÉ : {userTeam.name.toUpperCase()}</span>
+            <div style={{ display: "flex", gap: "10px" }}>
+              <div style={{ background: "rgba(255,70,85,0.1)", padding: "5px 15px", borderRadius: "4px", border: "1px solid #ff4655" }}>
+                <span style={{ color: "#ff4655", fontSize: "0.7rem", fontWeight: "900", letterSpacing: "1px" }}>ÉQUIPE : {userTeam.name.toUpperCase()}</span>
+              </div>
+              {userTeam.join_code && (
+                <div 
+                  title="Partagez ce code pour inviter des membres"
+                  style={{ background: "rgba(0,242,255,0.1)", padding: "5px 15px", borderRadius: "4px", border: "1px solid #00f2ff", cursor: "help" }}
+                >
+                  <span style={{ color: "#00f2ff", fontSize: "0.7rem", fontWeight: "900", letterSpacing: "1px" }}>CODE : {userTeam.join_code}</span>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -656,6 +912,7 @@ export default function StratBook() {
             <p style={{ margin: 0, fontSize: "0.8rem", fontWeight: "900", color: "white" }}>{displayName.toUpperCase()}</p>
             <p style={{ margin: 0, fontSize: "0.6rem", color: "#666" }}>{isAdmin ? "ADMINISTRATEUR" : "OPÉRATEUR"}</p>
           </div>
+          <button onClick={resetMyProfile} style={{ background: "transparent", border: "1px solid #ff4655", color: "#ff4655", padding: "8px 15px", borderRadius: "4px", cursor: "pointer", fontSize: "0.6rem", fontWeight: "bold" }}>RÉINITIALISER PROFIL (TEST)</button>
           <button onClick={() => supabase.auth.signOut()} style={{ background: "transparent", border: "1px solid #333", color: "#666", padding: "8px 15px", borderRadius: "4px", cursor: "pointer", fontSize: "0.7rem", fontWeight: "bold", transition: "0.2s" }} onMouseEnter={e => { e.currentTarget.style.borderColor = "#ff4655"; e.currentTarget.style.color = "#ff4655"; }} onMouseLeave={e => { e.currentTarget.style.borderColor = "#333"; e.currentTarget.style.color = "#666"; }}>DÉCONNEXION</button>
         </div>
       </header>
@@ -751,6 +1008,21 @@ export default function StratBook() {
                 ))} 
               </div>
             ))}
+
+            {userTeam && (
+              <div 
+                onClick={() => { setView("team-menu"); setIsNavOpen(false); }}
+                style={{ 
+                  marginTop: "10px", padding: "15px", background: view === "team-menu" ? "rgba(0,242,255,0.2)" : "rgba(255,255,255,0.05)", 
+                  border: "1px solid " + (view === "team-menu" ? "#00f2ff" : "#333"), borderRadius: "8px", cursor: "pointer", 
+                  textAlign: "center", transition: "0.2s" 
+                }}
+                onMouseEnter={e => e.currentTarget.style.borderColor = "#00f2ff"}
+                onMouseLeave={e => e.currentTarget.style.borderColor = view === "team-menu" ? "#00f2ff" : "#333"}
+              >
+                <p style={{ fontSize: "0.7rem", fontWeight: "900", color: "#00f2ff", margin: 0, letterSpacing: "1px" }}>👥 MENU ÉQUIPE</p>
+              </div>
+            )}
 
             {isAdmin && (
               <div 
@@ -860,6 +1132,134 @@ export default function StratBook() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* MENU ÉQUIPE (PLANNINGS) */}
+        {view === "team-menu" && userTeam && (
+          <div style={{ maxWidth: "1400px", margin: "0 auto", paddingBottom: "100px" }}>
+            <h2 style={{ color: "#00f2ff", borderLeft: "4px solid #00f2ff", paddingLeft: "15px", marginBottom: "40px", fontSize: "1.5rem", fontWeight: "900", letterSpacing: "2px" }}>
+              GESTION DE L'ÉQUIPE : {userTeam.name.toUpperCase()}
+            </h2>
+
+            {/* SECTION 1 : DISPONIBILITÉS DES JOUEURS */}
+            <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: "20px", padding: "30px", border: "1px solid rgba(0,242,255,0.1)", marginBottom: "50px" }}>
+              <h3 style={{ color: "white", fontSize: "1.2rem", fontWeight: "900", marginBottom: "25px", display: "flex", alignItems: "center", gap: "10px" }}>
+                <span style={{ color: "#00f2ff" }}>📅</span> DISPONIBILITÉS DE LA SEMAINE
+              </h3>
+              
+              <div style={{ display: "flex", gap: "20px", overflowX: "auto", paddingBottom: "20px" }} className="nav-no-scrollbar">
+                {teamMembers.map(member => (
+                  <div key={member.user_id} style={{ minWidth: "200px", background: "rgba(0,0,0,0.3)", borderRadius: "12px", border: "1px solid #333", overflow: "hidden" }}>
+                    <div style={{ background: "rgba(0,242,255,0.1)", padding: "10px", textAlign: "center", borderBottom: "1px solid #333" }}>
+                      <p style={{ margin: 0, fontWeight: "900", fontSize: "0.8rem", color: "#00f2ff" }}>{member.profiles.display_name.toUpperCase()}</p>
+                      <p style={{ margin: 0, fontSize: "0.6rem", color: "#666" }}>{member.role.toUpperCase()}</p>
+                    </div>
+                    
+                    <div style={{ padding: "10px" }}>
+                      {/* En-tête jours */}
+                      <div style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", gap: "2px", marginBottom: "5px", textAlign: "center", fontSize: "0.6rem", fontWeight: "bold", color: "#444" }}>
+                        <div />
+                        {["L", "M", "M", "J", "V", "S", "D"].map((d, i) => <div key={i}>{d}</div>)}
+                      </div>
+                      
+                      {/* Grille d'heures */}
+                      {Array.from({ length: 15 }).map((_, h) => {
+                        const hour = (h + 10).toString().padStart(2, '0') + "H";
+                        const hourKey = (h + 10).toString();
+                        return (
+                          <div key={hour} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", gap: "2px", marginBottom: "2px", alignItems: "center" }}>
+                            <div style={{ fontSize: "0.55rem", color: "#666", textAlign: "right", paddingRight: "5px" }}>{hour}</div>
+                            {["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map(day => {
+                              const isAvailable = availabilityData[member.user_id]?.[day]?.[hourKey];
+                              const isMe = session?.user.id === member.user_id;
+                              return (
+                                <div 
+                                  key={day} 
+                                  onClick={() => isMe && toggleAvailability(day, hourKey)}
+                                  style={{ 
+                                    aspectRatio: "1/1", 
+                                    background: isAvailable ? "#00f2ff" : "rgba(255,255,255,0.05)", 
+                                    borderRadius: "2px", 
+                                    cursor: isMe ? "pointer" : "default",
+                                    border: isMe ? "1px solid rgba(0,242,255,0.3)" : "none",
+                                    transition: "0.2s"
+                                  }} 
+                                />
+                              );
+                            })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* SECTION 2 : PLANNING DE PRACC (STAFF ONLY EDIT) */}
+            <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: "20px", padding: "30px", border: "1px solid rgba(255,70,85,0.1)" }}>
+              <h3 style={{ color: "white", fontSize: "1.2rem", fontWeight: "900", marginBottom: "25px", display: "flex", alignItems: "center", gap: "10px" }}>
+                <span style={{ color: "#ff4655" }}>⚔️</span> PLANNING DE PRACC / ENTRAÎNEMENT
+              </h3>
+
+              <div style={{ overflowX: "auto" }} className="nav-no-scrollbar">
+                <table style={{ width: "100%", borderCollapse: "collapse", color: "white" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ padding: "15px", border: "1px solid #333", background: "rgba(0,0,0,0.5)", width: "100px" }}>HEURE</th>
+                      {["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map(day => (
+                        <th key={day} style={{ padding: "15px", border: "1px solid #333", background: "rgba(0,0,0,0.5)", fontSize: "0.8rem", textTransform: "uppercase" }}>{day}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Array.from({ length: 15 }).map((_, h) => {
+                      const hourKey = (h + 10).toString();
+                      const hourLabel = `${hourKey}H - ${(parseInt(hourKey)+1)}H`;
+                      return (
+                        <tr key={hourKey}>
+                          <td style={{ padding: "10px", border: "1px solid #333", textAlign: "center", fontSize: "0.7rem", fontWeight: "bold", background: "rgba(0,0,0,0.2)" }}>{hourLabel}</td>
+                          {["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map(day => {
+                            const entry = praccSchedule.find(p => p.day === day && p.hour === hourKey);
+                            
+                            // Calcul du nombre de dispos pour ce créneau
+                            const availableCount = Object.values(availabilityData).filter(userDispos => userDispos[day]?.[hourKey]).length;
+                            
+                            return (
+                              <td key={day} style={{ border: "1px solid #333", position: "relative", minWidth: "150px", height: "60px", background: entry ? "rgba(255,70,85,0.1)" : "transparent" }}>
+                                {isCoachOrAdmin ? (
+                                  <select 
+                                    value={entry?.activity_type || ""} 
+                                    onChange={(e) => updatePraccSchedule(day, hourKey, e.target.value)}
+                                    style={{ width: "100%", height: "100%", background: "transparent", border: "none", color: entry ? "#ff4655" : "#444", padding: "10px", cursor: "pointer", fontSize: "0.7rem", fontWeight: "900", appearance: "none", textAlign: "center" }}
+                                  >
+                                    <option value="" style={{ background: "#0f1923" }}>--- LIBRE ---</option>
+                                    <option value="Pracc" style={{ background: "#0f1923" }}>⚔️ PRACC</option>
+                                    <option value="Premier" style={{ background: "#0f1923" }}>🏆 PREMIER</option>
+                                    <option value="VOD Review" style={{ background: "#0f1923" }}>📺 VOD REVIEW</option>
+                                    <option value="Théorie" style={{ background: "#0f1923" }}>🧠 THÉORIE</option>
+                                    <option value="Tournoi" style={{ background: "#0f1923" }}>🏅 TOURNOI</option>
+                                    <option value="Réunion" style={{ background: "#0f1923" }}>💬 RÉUNION</option>
+                                  </select>
+                                ) : (
+                                  <div style={{ textAlign: "center", color: "#ff4655", fontSize: "0.7rem", fontWeight: "900" }}>{entry?.activity_type?.toUpperCase()}</div>
+                                )}
+                                
+                                {/* Badge nombre de dispos */}
+                                <div style={{ position: "absolute", top: "2px", right: "2px", fontSize: "0.6rem", background: availableCount >= 5 ? "green" : availableCount > 0 ? "#ff4655" : "#222", color: "white", padding: "2px 5px", borderRadius: "3px", fontWeight: "bold" }}>
+                                  {availableCount}
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
