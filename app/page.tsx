@@ -90,7 +90,12 @@ const AGENT_ICON_BASE_URL = "https://dsqlvperlkpdzcmjcvpj.supabase.co/storage/v1
 const BACKGROUND_URL = "https://dsqlvperlkpdzcmjcvpj.supabase.co/storage/v1/object/public/Image%20map/Valorant%20Background.jpg";
 
 export default function StratBook() {
-  const [view, setView] = useState<"home" | "map" | "admin" | "team-menu">("home")
+  const [view, setView] = useState<"home" | "map" | "admin" | "admin-team" | "team-menu">("home")
+  const [teamSubView, setTeamSubView] = useState<"members" | "availability" | "pracc">("members")
+  const [adminSubView, setAdminSubView] = useState<"users" | "teams">("users")
+  const [teamsList, setTeamsList] = useState<any[]>([])
+  const [selectedAdminTeam, setSelectedAdminTeam] = useState<any | null>(null)
+  const [selectedTeamMembers, setSelectedTeamMembers] = useState<any[]>([])
   const [activeMap, setActiveMap] = useState<MapData | null>(null)
   const [maps, setMaps] = useState<MapData[]>([])
   const [loading, setLoading] = useState(true)
@@ -115,13 +120,15 @@ export default function StratBook() {
   const [authError, setAuthError] = useState<string | null>(null)
   const [isVerifyStep, setIsVerifyStep] = useState(false)
   const [displayName, setDisplayName] = useState("")
-  const [userTeam, setUserTeam] = useState<{ id: string, name: string, join_code?: string } | null>(null)
+  const [userTeam, setUserTeam] = useState<{ id: string, name: string, join_code?: string, role?: string } | null>(null)
   const [onboardingStep, setOnboardingStep] = useState<"pseudo" | "team" | "none">("pseudo")
   const [newTeamName, setNewTeamName] = useState("")
   const [joinCode, setJoinCode] = useState("")
   const [allUsers, setAllUsers] = useState<any[]>([])
   const [stats, setStats] = useState({ strategies: 0, users: 0 })
   const [isOnboardingLoading, setIsOnboardingLoading] = useState(false)
+  const [showAddMember, setShowAddMember] = useState(false)
+  const [addMemberInput, setAddMemberInput] = useState("")
   
   // États pour le Planning
   const [teamMembers, setTeamMembers] = useState<any[]>([])
@@ -149,44 +156,75 @@ export default function StratBook() {
 
   useEffect(() => { if (activeMap) fetchCompositions(activeMap.id) }, [activeMap])
   useEffect(() => { if (selectedCompo && selectedSide && activeTab) fetchStrategies() }, [selectedCompo, selectedSide, activeTab])
-  useEffect(() => { if (view === "admin") fetchAdminData() }, [view])
+  useEffect(() => {
+    if (view === "admin") fetchAdminData();
+    if (view === "admin-team") {
+      fetchAdminTeams();
+      setAdminSubView("teams");
+    }
+  }, [view])
   useEffect(() => { if (view === "team-menu" && userTeam) fetchTeamMenuData() }, [view, userTeam])
 
   async function fetchTeamMenuData() {
     if (!userTeam) return;
     
+    console.log("TeamMenu: Récupération des données pour l'équipe", userTeam.id);
+    
     // 1. Récupérer les membres de l'équipe
     const { data: members, error: membersError } = await supabase
       .from('team_members')
-      .select('user_id, role, profiles(display_name)')
+      .select(`
+        user_id, 
+        role, 
+        profiles:user_id (
+          display_name
+        )
+      `)
       .eq('team_id', userTeam.id);
     
-    if (members) setTeamMembers(members);
+    if (membersError) {
+      console.error("TeamMenu Error (members):", membersError);
+    } else {
+      console.log("TeamMenu: Données brutes reçues de Supabase:", members);
+      // On s'assure que profiles n'est pas nul pour l'affichage
+      const formattedMembers = members?.map(m => ({
+        ...m,
+        profiles: m.profiles || { display_name: "Recrue Inconnue" }
+      })) || [];
+      setTeamMembers(formattedMembers);
+    }
     
     // 2. Récupérer les dispos
-    const { data: availability } = await supabase
+    const { data: availability, error: availError } = await supabase
       .from('team_availability')
       .select('*')
       .eq('team_id', userTeam.id);
     
-    // Transformer en map [userId][day][hour] = boolean
-    const availabilityMap: Record<string, any> = {};
-    availability?.forEach(item => {
-      if (!availabilityMap[item.user_id]) availabilityMap[item.user_id] = {};
-      if (!availabilityMap[item.user_id][item.day]) availabilityMap[item.user_id][item.day] = {};
-      availabilityMap[item.user_id][item.day][item.hour] = item.is_available;
-    });
-    setAvailabilityData(availabilityMap);
+    if (availError) {
+      console.error("TeamMenu Error (availability):", availError);
+    } else {
+      const availabilityMap: Record<string, any> = {};
+      availability?.forEach(item => {
+        if (!availabilityMap[item.user_id]) availabilityMap[item.user_id] = {};
+        if (!availabilityMap[item.user_id][item.day]) availabilityMap[item.user_id][item.day] = {};
+        availabilityMap[item.user_id][item.day][item.hour] = item.is_available;
+      });
+      setAvailabilityData(availabilityMap);
+    }
 
     // 3. Récupérer le planning Pracc
-    const { data: pracc } = await supabase
+    const { data: pracc, error: praccError } = await supabase
       .from('team_schedules')
       .select('*')
       .eq('team_id', userTeam.id)
       .order('day', { ascending: true })
       .order('hour', { ascending: true });
     
-    setPraccSchedule(pracc || []);
+    if (praccError) {
+      console.error("TeamMenu Error (pracc):", praccError);
+    } else {
+      setPraccSchedule(pracc || []);
+    }
   }
 
   async function toggleAvailability(day: string, hour: string) {
@@ -242,6 +280,69 @@ export default function StratBook() {
       console.error("Error saving pracc schedule:", error);
       fetchTeamMenuData();
     }
+  }
+
+  async function kickMember(userId: string, userName: string) {
+    if (!userTeam || userTeam.role !== 'owner' || !confirm(`Voulez-vous vraiment exclure ${userName} de l'équipe ?`)) return;
+
+    const { error } = await supabase
+      .from('team_members')
+      .delete()
+      .eq('team_id', userTeam.id)
+      .eq('user_id', userId);
+
+    if (error) {
+      alert("Erreur lors de l'exclusion du membre : " + error.message);
+    } else {
+      fetchTeamMenuData();
+    }
+  }
+
+  async function addMemberToTeam() {
+    if (!userTeam || userTeam.role !== 'owner' || !addMemberInput.trim()) return;
+    
+    setIsOnboardingLoading(true);
+    
+    // 1. Chercher l'utilisateur par son pseudo (display_name)
+    const { data: profile, error: searchError } = await supabase
+      .from('profiles')
+      .select('id, display_name')
+      .ilike('display_name', addMemberInput.trim())
+      .maybeSingle();
+
+    if (searchError || !profile) {
+      alert("Utilisateur introuvable. Assurez-vous d'utiliser son pseudo exact.");
+      setIsOnboardingLoading(false);
+      return;
+    }
+
+    // 2. Vérifier s'il est déjà dans une équipe
+    const { data: existing } = await supabase
+      .from('team_members')
+      .select('team_id')
+      .eq('user_id', profile.id)
+      .maybeSingle();
+
+    if (existing) {
+      alert("Cet utilisateur est déjà membre d'une équipe.");
+      setIsOnboardingLoading(false);
+      return;
+    }
+
+    // 3. Ajouter l'utilisateur à l'équipe
+    const { error: addError } = await supabase
+      .from('team_members')
+      .insert([{ team_id: userTeam.id, user_id: profile.id, role: 'member' }]);
+
+    if (addError) {
+      alert("Erreur lors de l'ajout : " + addError.message);
+    } else {
+      alert(`${profile.display_name} a été ajouté à l'équipe !`);
+      setAddMemberInput("");
+      setShowAddMember(false);
+      fetchTeamMenuData();
+    }
+    setIsOnboardingLoading(false);
   }
 
   async function fetchUserProfile(userId: string) {
@@ -312,7 +413,7 @@ export default function StratBook() {
     console.log("Onboarding: Vérification de l'appartenance à une équipe...");
     const { data: memberData, error: memberError } = await supabase
       .from('team_members')
-      .select('team_id, teams(id, name, join_code)')
+      .select('team_id, role, teams(id, name, join_code)')
       .eq('user_id', userId)
       .maybeSingle();
 
@@ -326,7 +427,8 @@ export default function StratBook() {
     if (memberData && memberData.teams) {
       console.log("Onboarding: Équipe trouvée !", memberData.teams);
       const team = Array.isArray(memberData.teams) ? memberData.teams[0] : memberData.teams;
-      setUserTeam(team as { id: string, name: string, join_code?: string });
+      // On fusionne le rôle de l'utilisateur avec les infos de l'équipe
+      setUserTeam({ ...team as { id: string, name: string, join_code?: string }, role: memberData.role });
       setOnboardingStep("none");
     } else {
       console.log("Onboarding: Pas d'équipe trouvée, affichage de l'écran Équipe");
@@ -417,6 +519,59 @@ export default function StratBook() {
     const { error } = await supabase.from('profiles').update({ is_admin: isAdminValue }).eq('id', userId);
     if (!error) fetchAdminData();
     else alert("Erreur lors de la mise à jour du rôle");
+  }
+
+  async function fetchAdminTeams() {
+    if (!isAdmin) return;
+    const { data: teams } = await supabase.from('teams').select('*').order('name', { ascending: true });
+    setTeamsList(teams || []);
+    setSelectedAdminTeam(null);
+    setSelectedTeamMembers([]);
+  }
+
+  async function fetchAdminTeamMembers(teamId: string) {
+    const { data, error } = await supabase
+      .from('team_members')
+      .select('user_id, role, profiles:user_id(display_name)')
+      .eq('team_id', teamId);
+
+    if (error) {
+      console.error('Erreur récupération membres d\'équipe', error);
+      setSelectedTeamMembers([]);
+      return;
+    }
+
+    setSelectedTeamMembers(data || []);
+  }
+
+  async function updateTeamMemberRole(userId: string, role: string) {
+    if (!selectedAdminTeam) return;
+    const { error } = await supabase
+      .from('team_members')
+      .update({ role })
+      .eq('team_id', selectedAdminTeam.id)
+      .eq('user_id', userId);
+
+    if (error) {
+      alert('Erreur mise à jour rôle membre');
+    } else {
+      fetchAdminTeamMembers(selectedAdminTeam.id);
+    }
+  }
+
+  async function removeTeamMember(userId: string) {
+    if (!selectedAdminTeam) return;
+    const { error } = await supabase
+      .from('team_members')
+      .delete()
+      .eq('team_id', selectedAdminTeam.id)
+      .eq('user_id', userId);
+
+    if (error) {
+      alert('Erreur suppression membre');
+    } else {
+      fetchAdminTeamMembers(selectedAdminTeam.id);
+    }
   }
 
   async function handleSocialAuth(provider: 'discord' | 'google') {
@@ -877,33 +1032,36 @@ export default function StratBook() {
   return (
     <div style={{ backgroundColor: "#0f1923", color: "white", minHeight: "100vh", position: "relative", fontFamily: 'sans-serif' }}>
       
-      {/* BANDEAU DE TEST FORCÉ */}
-      <div style={{ position: "fixed", top: 0, left: 0, right: 0, height: "3px", background: "#ff4655", zIndex: 9999 }} />
-      <button 
-        onClick={resetMyProfile} 
-        style={{ position: "fixed", bottom: "20px", right: "20px", zIndex: 9999, background: "#ff4655", color: "white", border: "none", padding: "15px 25px", borderRadius: "50px", fontWeight: "900", cursor: "pointer", boxShadow: "0 10px 30px rgba(255,70,85,0.5)", border: "2px solid white" }}
-      >
-        ⚠️ RÉINITIALISER TOUT (DEBUG)
-      </button>
-
       <div style={{ position: "fixed", top: 0, left: 0, width: "100%", height: "100%", backgroundImage: `linear-gradient(rgba(15, 25, 35, 0.85), rgba(15, 25, 35, 0.98)), url(${BACKGROUND_URL})`, backgroundSize: "cover", zIndex: 0 }} />
 
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "15px 40px", borderBottom: "2px solid #ff4655", position: "fixed", top: 0, left: 0, width: "100%", zIndex: 1000, background: "rgba(10, 15, 20, 0.95)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "20px" }}>
           <h1 style={{ color: "#ff4655", margin: 0, fontWeight: "900", cursor: "pointer", fontSize: "1.4rem", letterSpacing: "2px" }} onClick={() => setView("home")}>SCORTECK STRATBOOK</h1>
           {userTeam && (
-            <div style={{ display: "flex", gap: "10px" }}>
-              <div style={{ background: "rgba(255,70,85,0.1)", padding: "5px 15px", borderRadius: "4px", border: "1px solid #ff4655" }}>
+            <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+              <div style={{ background: "rgba(255,70,85,0.1)", padding: "5px 15px", borderRadius: "4px", border: "1px solid #ff4655", display: "flex", alignItems: "center", gap: "8px" }}>
+                {userTeam.role === 'owner' && <span title="Capitaine de l'équipe" style={{ fontSize: "0.9rem" }}>👑</span>}
                 <span style={{ color: "#ff4655", fontSize: "0.7rem", fontWeight: "900", letterSpacing: "1px" }}>ÉQUIPE : {userTeam.name.toUpperCase()}</span>
               </div>
-              {userTeam.join_code && (
-                <div 
-                  title="Partagez ce code pour inviter des membres"
-                  style={{ background: "rgba(0,242,255,0.1)", padding: "5px 15px", borderRadius: "4px", border: "1px solid #00f2ff", cursor: "help" }}
-                >
-                  <span style={{ color: "#00f2ff", fontSize: "0.7rem", fontWeight: "900", letterSpacing: "1px" }}>CODE : {userTeam.join_code}</span>
-                </div>
-              )}
+              <button 
+                onClick={() => setView("team-menu")}
+                style={{ 
+                  background: view === "team-menu" ? "rgba(0,242,255,0.2)" : "transparent", 
+                  border: "1px solid #00f2ff", 
+                  color: "#00f2ff", 
+                  padding: "5px 15px", 
+                  borderRadius: "4px", 
+                  cursor: "pointer", 
+                  fontSize: "0.7rem", 
+                  fontWeight: "900",
+                  letterSpacing: "1px",
+                  transition: "0.2s"
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = "rgba(0,242,255,0.2)"; }}
+                onMouseLeave={e => { if(view !== "team-menu") e.currentTarget.style.background = "transparent"; }}
+              >
+                👥 MENU ÉQUIPE
+              </button>
             </div>
           )}
         </div>
@@ -1009,21 +1167,6 @@ export default function StratBook() {
               </div>
             ))}
 
-            {userTeam && (
-              <div 
-                onClick={() => { setView("team-menu"); setIsNavOpen(false); }}
-                style={{ 
-                  marginTop: "10px", padding: "15px", background: view === "team-menu" ? "rgba(0,242,255,0.2)" : "rgba(255,255,255,0.05)", 
-                  border: "1px solid " + (view === "team-menu" ? "#00f2ff" : "#333"), borderRadius: "8px", cursor: "pointer", 
-                  textAlign: "center", transition: "0.2s" 
-                }}
-                onMouseEnter={e => e.currentTarget.style.borderColor = "#00f2ff"}
-                onMouseLeave={e => e.currentTarget.style.borderColor = view === "team-menu" ? "#00f2ff" : "#333"}
-              >
-                <p style={{ fontSize: "0.7rem", fontWeight: "900", color: "#00f2ff", margin: 0, letterSpacing: "1px" }}>👥 MENU ÉQUIPE</p>
-              </div>
-            )}
-
             {isAdmin && (
               <div 
                 onClick={() => { setView("admin"); setIsNavOpen(false); }}
@@ -1036,6 +1179,21 @@ export default function StratBook() {
                 onMouseLeave={e => e.currentTarget.style.borderColor = view === "admin" ? "#ff4655" : "#333"}
               >
                 <p style={{ fontSize: "0.7rem", fontWeight: "900", color: "#ff4655", margin: 0, letterSpacing: "1px" }}>⚙️ ADMINISTRATION</p>
+              </div>
+            )}
+
+            {isAdmin && (
+              <div 
+                onClick={() => { setView("admin-team"); setIsNavOpen(false); }}
+                style={{ 
+                  marginTop: "12px", padding: "15px", background: view === "admin-team" ? "rgba(0,242,255,0.2)" : "rgba(255,255,255,0.05)", 
+                  border: "1px solid " + (view === "admin-team" ? "#00f2ff" : "#333"), borderRadius: "8px", cursor: "pointer", 
+                  textAlign: "center", transition: "0.2s" 
+                }}
+                onMouseEnter={e => e.currentTarget.style.borderColor = "#00f2ff"}
+                onMouseLeave={e => e.currentTarget.style.borderColor = view === "admin-team" ? "#00f2ff" : "#333"}
+              >
+                <p style={{ fontSize: "0.7rem", fontWeight: "900", color: "#00f2ff", margin: 0, letterSpacing: "1px" }}>🏆 EQUIPE</p>
               </div>
             )}
           </>
@@ -1139,128 +1297,242 @@ export default function StratBook() {
         {/* MENU ÉQUIPE (PLANNINGS) */}
         {view === "team-menu" && userTeam && (
           <div style={{ maxWidth: "1400px", margin: "0 auto", paddingBottom: "100px" }}>
-            <h2 style={{ color: "#00f2ff", borderLeft: "4px solid #00f2ff", paddingLeft: "15px", marginBottom: "40px", fontSize: "1.5rem", fontWeight: "900", letterSpacing: "2px" }}>
-              GESTION DE L'ÉQUIPE : {userTeam.name.toUpperCase()}
-            </h2>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: "30px", borderBottom: "2px solid #00f2ff", paddingBottom: "15px" }}>
+              <h2 style={{ color: "#00f2ff", margin: 0, fontSize: "1.5rem", fontWeight: "900", letterSpacing: "2px" }}>
+                ÉQUIPE : {userTeam.name.toUpperCase()}
+              </h2>
+              {userTeam.join_code && (
+                <div style={{ background: "rgba(0,242,255,0.1)", padding: "10px 20px", borderRadius: "8px", border: "1px solid #00f2ff" }}>
+                  <span style={{ color: "#00f2ff", fontSize: "0.8rem", fontWeight: "900", letterSpacing: "2px" }}>CODE D'INVITATION : {userTeam.join_code}</span>
+                </div>
+              )}
+            </div>
 
-            {/* SECTION 1 : DISPONIBILITÉS DES JOUEURS */}
-            <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: "20px", padding: "30px", border: "1px solid rgba(0,242,255,0.1)", marginBottom: "50px" }}>
-              <h3 style={{ color: "white", fontSize: "1.2rem", fontWeight: "900", marginBottom: "25px", display: "flex", alignItems: "center", gap: "10px" }}>
-                <span style={{ color: "#00f2ff" }}>📅</span> DISPONIBILITÉS DE LA SEMAINE
-              </h3>
-              
-              <div style={{ display: "flex", gap: "20px", overflowX: "auto", paddingBottom: "20px" }} className="nav-no-scrollbar">
-                {teamMembers.map(member => (
-                  <div key={member.user_id} style={{ minWidth: "200px", background: "rgba(0,0,0,0.3)", borderRadius: "12px", border: "1px solid #333", overflow: "hidden" }}>
-                    <div style={{ background: "rgba(0,242,255,0.1)", padding: "10px", textAlign: "center", borderBottom: "1px solid #333" }}>
-                      <p style={{ margin: 0, fontWeight: "900", fontSize: "0.8rem", color: "#00f2ff" }}>{member.profiles.display_name.toUpperCase()}</p>
-                      <p style={{ margin: 0, fontSize: "0.6rem", color: "#666" }}>{member.role.toUpperCase()}</p>
-                    </div>
-                    
-                    <div style={{ padding: "10px" }}>
-                      {/* En-tête jours */}
-                      <div style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", gap: "2px", marginBottom: "5px", textAlign: "center", fontSize: "0.6rem", fontWeight: "bold", color: "#444" }}>
-                        <div />
-                        {["L", "M", "M", "J", "V", "S", "D"].map((d, i) => <div key={i}>{d}</div>)}
+            {/* NAVIGATION INTERNE DU MENU ÉQUIPE */}
+            <div style={{ display: "flex", gap: "10px", marginBottom: "40px" }}>
+              {[
+                { id: "members", label: "👥 MEMBRES", color: "#00f2ff" },
+                { id: "availability", label: "📅 DISPONIBILITÉS", color: "#00f2ff" },
+                { id: "pracc", label: "⚔️ PLANNING PRACC", color: "#ff4655" }
+              ].map(tab => (
+                <button 
+                  key={tab.id}
+                  onClick={() => setTeamSubView(tab.id as any)}
+                  style={{ 
+                    padding: "12px 25px", 
+                    background: teamSubView === tab.id ? `${tab.color}22` : "rgba(255,255,255,0.03)", 
+                    border: `2px solid ${teamSubView === tab.id ? tab.color : "#333"}`, 
+                    color: teamSubView === tab.id ? "white" : "#666", 
+                    borderRadius: "8px", 
+                    cursor: "pointer", 
+                    fontSize: "0.8rem", 
+                    fontWeight: "900", 
+                    letterSpacing: "1px",
+                    transition: "0.2s"
+                  }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* VUE : LISTE DES MEMBRES */}
+            {teamSubView === "members" && (
+              <div>
+                {/* SECTION D'AJOUT POUR LE CAPITAINE */}
+                {userTeam.role === 'owner' && (
+                  <div style={{ marginBottom: "30px", background: "rgba(0,242,255,0.05)", padding: "20px", borderRadius: "12px", border: "1px dashed #00f2ff" }}>
+                    {!showAddMember ? (
+                      <button 
+                        onClick={() => setShowAddMember(true)}
+                        style={{ background: "#00f2ff", color: "#0f1923", padding: "10px 20px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer", fontSize: "0.8rem", letterSpacing: "1px" }}
+                      >
+                        ➕ AJOUTER UN MEMBRE
+                      </button>
+                    ) : (
+                      <div style={{ display: "flex", gap: "15px", alignItems: "center" }}>
+                        <input 
+                          type="text" 
+                          placeholder="PSEUDO DU JOUEUR..." 
+                          value={addMemberInput}
+                          onChange={(e) => setAddMemberInput(e.target.value)}
+                          disabled={isOnboardingLoading}
+                          style={{ flex: 1, background: "#0f1923", border: "1px solid #333", color: "white", padding: "10px", borderRadius: "4px", fontSize: "0.8rem" }}
+                        />
+                        <button 
+                          onClick={addMemberToTeam}
+                          disabled={isOnboardingLoading || !addMemberInput.trim()}
+                          style={{ background: "#00f2ff", color: "#0f1923", padding: "10px 20px", border: "none", borderRadius: "4px", fontWeight: "900", cursor: "pointer", fontSize: "0.8rem" }}
+                        >
+                          {isOnboardingLoading ? "AJOUT..." : "CONFIRMER L'AJOUT"}
+                        </button>
+                        <button 
+                          onClick={() => { setShowAddMember(false); setAddMemberInput(""); }}
+                          style={{ background: "transparent", border: "1px solid #333", color: "#666", padding: "10px 20px", borderRadius: "4px", cursor: "pointer", fontSize: "0.8rem" }}
+                        >
+                          ANNULER
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* LISTE DES MEMBRES ACTUELS */}
+                <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: "15px", border: "1px solid #333", padding: "30px" }}>
+                  <h3 style={{ color: "white", fontSize: "1rem", fontWeight: "900", marginBottom: "25px", borderBottom: "1px solid #333", paddingBottom: "15px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    MEMBRES DE L'ÉQUIPE 
+                    <span style={{ fontSize: "0.8rem", color: "#00f2ff", background: "rgba(0,242,255,0.1)", padding: "4px 12px", borderRadius: "20px" }}>{teamMembers.length} OPÉRATEURS</span>
+                  </h3>
+                  
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "25px" }}>
+                    {teamMembers.map(member => (
+                      <div key={member.user_id} style={{ background: "rgba(255,255,255,0.03)", borderRadius: "15px", border: "1px solid #333", padding: "20px", display: "flex", alignItems: "center", justifyContent: "space-between", transition: "0.3s" }} onMouseEnter={e => e.currentTarget.style.borderColor = "#00f2ff" } onMouseLeave={e => e.currentTarget.style.borderColor = "#333"}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "15px" }}>
+                          <div style={{ width: "50px", height: "50px", background: "#1a2531", borderRadius: "50%", border: "2px solid " + (member.role === 'owner' ? "#ff4655" : "#00f2ff"), display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2rem", fontWeight: "900", color: member.role === 'owner' ? "#ff4655" : "#00f2ff" }}>
+                            {member.profiles.display_name.charAt(0).toUpperCase()}
+                          </div>
+                          <div>
+                            <p style={{ margin: 0, color: "white", fontWeight: "900", fontSize: "1rem" }}>{member.profiles.display_name.toUpperCase()}</p>
+                            <p style={{ margin: "3px 0 0 0", color: member.role === 'owner' ? "#ff4655" : "#00f2ff", fontSize: "0.65rem", fontWeight: "900", letterSpacing: "1px", textTransform: "uppercase" }}>
+                              {member.role === 'owner' ? '👑 CAPITAINE' : '🎮 JOUEUR'}
+                            </p>
+                          </div>
+                        </div>
+                        
+                        {userTeam.role === 'owner' && member.user_id !== session?.user.id && (
+                          <button 
+                            onClick={() => kickMember(member.user_id, member.profiles.display_name)}
+                            style={{ background: "rgba(255,70,85,0.1)", border: "1px solid #ff4655", color: "#ff4655", padding: "6px 12px", borderRadius: "4px", fontSize: "0.6rem", fontWeight: "900", cursor: "pointer", transition: "0.2s" }}
+                            onMouseEnter={e => { e.currentTarget.style.background = "#ff4655"; e.currentTarget.style.color = "white"; }}
+                            onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,70,85,0.1)"; e.currentTarget.style.color = "#ff4655"; }}
+                          >
+                            EXCLURE
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* VUE : DISPONIBILITÉS */}
+            {teamSubView === "availability" && (
+              <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: "20px", padding: "30px", border: "1px solid rgba(0,242,255,0.1)" }}>
+                <h3 style={{ color: "white", fontSize: "1.2rem", fontWeight: "900", marginBottom: "25px", display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span style={{ color: "#00f2ff" }}>📅</span> DISPONIBILITÉS DE LA SEMAINE
+                </h3>
+                
+                <div style={{ display: "flex", gap: "20px", overflowX: "auto", paddingBottom: "20px" }} className="nav-no-scrollbar">
+                  {teamMembers.map(member => (
+                    <div key={member.user_id} style={{ minWidth: "200px", background: "rgba(0,0,0,0.3)", borderRadius: "12px", border: "1px solid #333", overflow: "hidden" }}>
+                      <div style={{ background: "rgba(0,242,255,0.1)", padding: "10px", textAlign: "center", borderBottom: "1px solid #333" }}>
+                        <p style={{ margin: 0, fontWeight: "900", fontSize: "0.8rem", color: "#00f2ff" }}>{member.profiles.display_name.toUpperCase()}</p>
+                        <p style={{ margin: 0, fontSize: "0.6rem", color: "#666" }}>{member.role.toUpperCase()}</p>
                       </div>
                       
-                      {/* Grille d'heures */}
+                      <div style={{ padding: "10px" }}>
+                        <div style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", gap: "2px", marginBottom: "5px", textAlign: "center", fontSize: "0.6rem", fontWeight: "bold", color: "#444" }}>
+                          <div />
+                          {["L", "M", "M", "J", "V", "S", "D"].map((d, i) => <div key={i}>{d}</div>)}
+                        </div>
+                        
+                        {Array.from({ length: 15 }).map((_, h) => {
+                          const hour = (h + 10).toString().padStart(2, '0') + "H";
+                          const hourKey = (h + 10).toString();
+                          return (
+                            <div key={hour} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", gap: "2px", marginBottom: "2px", alignItems: "center" }}>
+                              <div style={{ fontSize: "0.55rem", color: "#666", textAlign: "right", paddingRight: "5px" }}>{hour}</div>
+                              {["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map(day => {
+                                const isAvailable = availabilityData[member.user_id]?.[day]?.[hourKey];
+                                const isMe = session?.user.id === member.user_id;
+                                return (
+                                  <div 
+                                    key={day} 
+                                    onClick={() => isMe && toggleAvailability(day, hourKey)}
+                                    style={{ 
+                                      aspectRatio: "1/1", 
+                                      background: isAvailable ? "#00f2ff" : "rgba(255,255,255,0.05)", 
+                                      borderRadius: "2px", 
+                                      cursor: isMe ? "pointer" : "default",
+                                      border: isMe ? "1px solid rgba(0,242,255,0.3)" : "none",
+                                      transition: "0.2s"
+                                    }} 
+                                  />
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* VUE : PLANNING DE PRACC */}
+            {teamSubView === "pracc" && (
+              <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: "20px", padding: "30px", border: "1px solid rgba(255,70,85,0.1)" }}>
+                <h3 style={{ color: "white", fontSize: "1.2rem", fontWeight: "900", marginBottom: "25px", display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span style={{ color: "#ff4655" }}>⚔️</span> PLANNING DE PRACC / ENTRAÎNEMENT
+                </h3>
+
+                <div style={{ overflowX: "auto" }} className="nav-no-scrollbar">
+                  <table style={{ width: "100%", borderCollapse: "collapse", color: "white" }}>
+                    <thead>
+                      <tr>
+                        <th style={{ padding: "15px", border: "1px solid #333", background: "rgba(0,0,0,0.5)", width: "100px" }}>HEURE</th>
+                        {["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map(day => (
+                          <th key={day} style={{ padding: "15px", border: "1px solid #333", background: "rgba(0,0,0,0.5)", fontSize: "0.8rem", textTransform: "uppercase" }}>{day}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
                       {Array.from({ length: 15 }).map((_, h) => {
-                        const hour = (h + 10).toString().padStart(2, '0') + "H";
                         const hourKey = (h + 10).toString();
+                        const hourLabel = `${hourKey}H - ${(parseInt(hourKey)+1)}H`;
                         return (
-                          <div key={hour} style={{ display: "grid", gridTemplateColumns: "40px repeat(7, 1fr)", gap: "2px", marginBottom: "2px", alignItems: "center" }}>
-                            <div style={{ fontSize: "0.55rem", color: "#666", textAlign: "right", paddingRight: "5px" }}>{hour}</div>
+                          <tr key={hourKey}>
+                            <td style={{ padding: "10px", border: "1px solid #333", textAlign: "center", fontSize: "0.7rem", fontWeight: "bold", background: "rgba(0,0,0,0.2)" }}>{hourLabel}</td>
                             {["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map(day => {
-                              const isAvailable = availabilityData[member.user_id]?.[day]?.[hourKey];
-                              const isMe = session?.user.id === member.user_id;
+                              const entry = praccSchedule.find(p => p.day === day && p.hour === hourKey);
+                              const availableCount = Object.values(availabilityData).filter(userDispos => userDispos[day]?.[hourKey]).length;
+                              
                               return (
-                                <div 
-                                  key={day} 
-                                  onClick={() => isMe && toggleAvailability(day, hourKey)}
-                                  style={{ 
-                                    aspectRatio: "1/1", 
-                                    background: isAvailable ? "#00f2ff" : "rgba(255,255,255,0.05)", 
-                                    borderRadius: "2px", 
-                                    cursor: isMe ? "pointer" : "default",
-                                    border: isMe ? "1px solid rgba(0,242,255,0.3)" : "none",
-                                    transition: "0.2s"
-                                  }} 
-                                />
+                                <td key={day} style={{ border: "1px solid #333", position: "relative", minWidth: "150px", height: "60px", background: entry ? "rgba(255,70,85,0.1)" : "transparent" }}>
+                                  {isCoachOrAdmin ? (
+                                    <select 
+                                      value={entry?.activity_type || ""} 
+                                      onChange={(e) => updatePraccSchedule(day, hourKey, e.target.value)}
+                                      style={{ width: "100%", height: "100%", background: "transparent", border: "none", color: entry ? "#ff4655" : "#444", padding: "10px", cursor: "pointer", fontSize: "0.7rem", fontWeight: "900", appearance: "none", textAlign: "center" }}
+                                    >
+                                      <option value="" style={{ background: "#0f1923" }}>--- LIBRE ---</option>
+                                      <option value="Pracc" style={{ background: "#0f1923" }}>⚔️ PRACC</option>
+                                      <option value="Premier" style={{ background: "#0f1923" }}>🏆 PREMIER</option>
+                                      <option value="VOD Review" style={{ background: "#0f1923" }}>📺 VOD REVIEW</option>
+                                      <option value="Théorie" style={{ background: "#0f1923" }}>🧠 THÉORIE</option>
+                                      <option value="Tournoi" style={{ background: "#0f1923" }}>🏅 TOURNOI</option>
+                                      <option value="Réunion" style={{ background: "#0f1923" }}>💬 RÉUNION</option>
+                                    </select>
+                                  ) : (
+                                    <div style={{ textAlign: "center", color: "#ff4655", fontSize: "0.7rem", fontWeight: "900" }}>{entry?.activity_type?.toUpperCase()}</div>
+                                  )}
+                                  
+                                  <div style={{ position: "absolute", top: "2px", right: "2px", fontSize: "0.6rem", background: availableCount >= 5 ? "green" : availableCount > 0 ? "#ff4655" : "#222", color: "white", padding: "2px 5px", borderRadius: "3px", fontWeight: "bold" }}>
+                                    {availableCount}
+                                  </div>
+                                </td>
                               );
                             })}
-                          </div>
+                          </tr>
                         );
                       })}
-                    </div>
-                  </div>
-                ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-
-            {/* SECTION 2 : PLANNING DE PRACC (STAFF ONLY EDIT) */}
-            <div style={{ background: "rgba(255,255,255,0.02)", borderRadius: "20px", padding: "30px", border: "1px solid rgba(255,70,85,0.1)" }}>
-              <h3 style={{ color: "white", fontSize: "1.2rem", fontWeight: "900", marginBottom: "25px", display: "flex", alignItems: "center", gap: "10px" }}>
-                <span style={{ color: "#ff4655" }}>⚔️</span> PLANNING DE PRACC / ENTRAÎNEMENT
-              </h3>
-
-              <div style={{ overflowX: "auto" }} className="nav-no-scrollbar">
-                <table style={{ width: "100%", borderCollapse: "collapse", color: "white" }}>
-                  <thead>
-                    <tr>
-                      <th style={{ padding: "15px", border: "1px solid #333", background: "rgba(0,0,0,0.5)", width: "100px" }}>HEURE</th>
-                      {["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map(day => (
-                        <th key={day} style={{ padding: "15px", border: "1px solid #333", background: "rgba(0,0,0,0.5)", fontSize: "0.8rem", textTransform: "uppercase" }}>{day}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {Array.from({ length: 15 }).map((_, h) => {
-                      const hourKey = (h + 10).toString();
-                      const hourLabel = `${hourKey}H - ${(parseInt(hourKey)+1)}H`;
-                      return (
-                        <tr key={hourKey}>
-                          <td style={{ padding: "10px", border: "1px solid #333", textAlign: "center", fontSize: "0.7rem", fontWeight: "bold", background: "rgba(0,0,0,0.2)" }}>{hourLabel}</td>
-                          {["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"].map(day => {
-                            const entry = praccSchedule.find(p => p.day === day && p.hour === hourKey);
-                            
-                            // Calcul du nombre de dispos pour ce créneau
-                            const availableCount = Object.values(availabilityData).filter(userDispos => userDispos[day]?.[hourKey]).length;
-                            
-                            return (
-                              <td key={day} style={{ border: "1px solid #333", position: "relative", minWidth: "150px", height: "60px", background: entry ? "rgba(255,70,85,0.1)" : "transparent" }}>
-                                {isCoachOrAdmin ? (
-                                  <select 
-                                    value={entry?.activity_type || ""} 
-                                    onChange={(e) => updatePraccSchedule(day, hourKey, e.target.value)}
-                                    style={{ width: "100%", height: "100%", background: "transparent", border: "none", color: entry ? "#ff4655" : "#444", padding: "10px", cursor: "pointer", fontSize: "0.7rem", fontWeight: "900", appearance: "none", textAlign: "center" }}
-                                  >
-                                    <option value="" style={{ background: "#0f1923" }}>--- LIBRE ---</option>
-                                    <option value="Pracc" style={{ background: "#0f1923" }}>⚔️ PRACC</option>
-                                    <option value="Premier" style={{ background: "#0f1923" }}>🏆 PREMIER</option>
-                                    <option value="VOD Review" style={{ background: "#0f1923" }}>📺 VOD REVIEW</option>
-                                    <option value="Théorie" style={{ background: "#0f1923" }}>🧠 THÉORIE</option>
-                                    <option value="Tournoi" style={{ background: "#0f1923" }}>🏅 TOURNOI</option>
-                                    <option value="Réunion" style={{ background: "#0f1923" }}>💬 RÉUNION</option>
-                                  </select>
-                                ) : (
-                                  <div style={{ textAlign: "center", color: "#ff4655", fontSize: "0.7rem", fontWeight: "900" }}>{entry?.activity_type?.toUpperCase()}</div>
-                                )}
-                                
-                                {/* Badge nombre de dispos */}
-                                <div style={{ position: "absolute", top: "2px", right: "2px", fontSize: "0.6rem", background: availableCount >= 5 ? "green" : availableCount > 0 ? "#ff4655" : "#222", color: "white", padding: "2px 5px", borderRadius: "3px", fontWeight: "bold" }}>
-                                  {availableCount}
-                                </div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            )}
           </div>
         )}
 
@@ -1326,6 +1598,79 @@ export default function StratBook() {
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+
+        {view === "admin-team" && isAdmin && (
+          <div style={{ maxWidth: "1300px", margin: "0 auto" }}>
+            <h2 style={{ color: "#00f2ff", borderLeft: "4px solid #00f2ff", paddingLeft: "15px", marginBottom: "30px", fontSize: "1.5rem", fontWeight: "900", letterSpacing: "2px" }}>
+              GESTION DES ÉQUIPES (ADMIN)
+            </h2>
+
+            <div style={{ display: "flex", gap: "20px", marginBottom: "20px" }}>
+              {teamsList.map(team => (
+                <button
+                  key={team.id}
+                  onClick={() => { setSelectedAdminTeam(team); fetchAdminTeamMembers(team.id); }}
+                  style={{
+                    border: selectedAdminTeam?.id === team.id ? "2px solid #00f2ff" : "1px solid #333",
+                    background: selectedAdminTeam?.id === team.id ? "rgba(0,242,255,0.2)" : "rgba(255,255,255,0.03)",
+                    color: "white",
+                    padding: "10px 16px",
+                    borderRadius: "8px",
+                    cursor: "pointer",
+                    fontWeight: "900",
+                    whiteSpace: "nowrap"
+                  }}
+                >
+                  {team.name.toUpperCase()}
+                </button>
+              ))}
+            </div>
+
+            {selectedAdminTeam ? (
+              <div style={{ background: "rgba(255,255,255,0.02)", border: "1px solid #333", borderRadius: "15px", padding: "25px" }}>
+                <h3 style={{ color: "#00f2ff", marginBottom: "15px" }}>
+                  {selectedAdminTeam.name} - Membres ({selectedTeamMembers.length})
+                </h3>
+
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "15px" }}>
+                  {selectedTeamMembers.map((member) => (
+                    <div key={member.user_id} style={{ background: "rgba(0,0,0,0.3)", borderRadius: "10px", border: "1px solid #222", padding: "12px" }}>
+                      <p style={{ margin: 0, color: "#fff", fontWeight: "900" }}>
+                        {member.profiles?.display_name ? member.profiles.display_name : member.user_id}
+                      </p>
+                      <p style={{ margin: "4px 0 8px", fontSize: "0.75rem", color: "#aaa" }}>
+                        ({member.role || 'membre'})
+                      </p>
+                      <select
+                        value={member.role || 'member'}
+                        onChange={(e) => updateTeamMemberRole(member.user_id, e.target.value)}
+                        style={{ width: "100%", marginBottom: "8px", padding: "6px", borderRadius: "6px", border: "1px solid #333", background: "#0f1923", color: "white" }}
+                      >
+                        <option value="member">Depuis JOUEUR</option>
+                        <option value="captain">CAPITAINE</option>
+                        <option value="coach">COACH</option>
+                        <option value="owner">PROPRIÉTAIRE</option>
+                      </select>
+                      <button
+                        onClick={() => removeTeamMember(member.user_id)}
+                        style={{ width: "100%", background: "rgba(255,70,85,0.2)", border: "1px solid #ff4655", color: "#ff4655", borderRadius: "6px", padding: "6px", cursor: "pointer", fontWeight: "900" }}
+                      >
+                        SUPPRIMER DU GROUPE
+                      </button>
+                    </div>
+                  ))}
+                  {selectedTeamMembers.length === 0 && (
+                    <p style={{ color: "#aaa" }}>Aucun membre trouvé pour cette équipe.</p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <p style={{ color: "#aaa" }}>
+                Sélectionne une équipe ci-dessus pour gérer les membres et leurs droits.
+              </p>
+            )}
           </div>
         )}
 
